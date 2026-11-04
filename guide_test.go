@@ -69,7 +69,9 @@ func TestGuideVersionMatchesReadme(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	marker := "version-" + machinVersion + "-blue"
+	// Escape hyphens for markdown badge URL if present
+	badgeVer := strings.ReplaceAll(machinVersion, "-", "--")
+	marker := "version-" + badgeVer + "-blue"
 	if !strings.Contains(string(data), marker) {
 		t.Fatalf("README badge does not show machinVersion %q (looked for %q)", machinVersion, marker)
 	}

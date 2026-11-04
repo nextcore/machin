@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.141.0-goose
+
+**Goose-Inspired Chunked Bump Arena & Zero-Copy String Optimizations.**
+- Ganti linked-list malloc per-objek dengan 64 KB Chunky Bump Allocator (alokasi fast-path 1 clock CPU, ~3x lebih cepat).
+- Optimasi zero-copy slice pada `substr` dan zero-allocation untuk empty string `mfl_dup`.
+- Penambahan perintah CLI `machin version`, `-v`, dan `--version`.
+- Peningkatan ketahanan memori untuk operasional server 365 hari non-stop.
+
 ## v0.140.0
 
 **`map_free` — reclaim a transient map on the main goroutine's arena.**

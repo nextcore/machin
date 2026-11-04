@@ -251,26 +251,35 @@ typedef struct { void* data; int64_t len; int64_t cap; } mfl_slice;
 /* closures: a function pointer plus a heap environment of captured values */
 typedef struct { void* fn; void* env; } mfl_closure;
 
-/* ---- arena memory management ----
+/* ---- arena memory management (Goose-inspired Chunky Bump Allocator) ----
    Value buffers (strings, slice backings, closure environments) are allocated
-   from a per-goroutine arena and reclaimed in bulk when the goroutine finishes.
-   The main goroutine's arena lives for the whole program. This bounds the
-   memory of a long-running concurrent server: each request handler runs in its
-   own goroutine and frees everything it allocated on return. Subsystems that
-   free explicitly (channels, maps, goroutine args) use raw malloc/free. */
-typedef struct mfl_blk { struct mfl_blk* next; size_t size; } mfl_blk;
+   from a per-goroutine chunked bump arena and reclaimed in bulk when the goroutine
+   finishes or arena_reset is called. Subsystems that free explicitly (channels, maps,
+   goroutine args) use raw malloc/free. */
+#define MFL_CHUNK_SIZE (64u * 1024u) /* 64 KB chunk default (keeps chunks below glibc mmap threshold) */
+
+typedef struct mfl_chunk {
+    struct mfl_chunk* next;
+    size_t used;
+    size_t cap;
+    char data[];
+} mfl_chunk;
+
 /* scoped: 1 for an arena-block's arena (freed at block exit), 0 for a goroutine's or
    main's root arena (freed only when the goroutine returns / at exit). warned: the growth
    tripwire below fired already for this arena. */
-typedef struct { mfl_blk* head; size_t bytes; int scoped; int warned; } mfl_arena;
-static mfl_arena mfl_main_arena = { NULL };
+typedef struct {
+    mfl_chunk* head;
+    mfl_chunk* cur;
+    size_t bytes;
+    int scoped;
+    int warned;
+} mfl_arena;
+
+static mfl_arena mfl_main_arena = { NULL, NULL, 0, 0, 0 };
 static _Thread_local mfl_arena* mfl_arena_cur = NULL;
-/* Arena growth tripwire (#660). A root arena is reclaimed only when its goroutine exits, so
-   a long loop of ordinary temporaries (substr, concatenation, a per-item slice) grows it
-   without bound — a correct program that dies to the OOM killer with no trace of why. When a
-   ROOT arena (never a scoped arena-block one) passes MFL_ARENA_WARN_MB (default 1024; 0
-   disables), say so once on stderr and point at the fix. Costs two compares on an allocation
-   that already does a malloc. */
+
+/* Arena growth tripwire (#660). */
 static size_t mfl_arena_warn_bytes = (size_t)1024 * 1024 * 1024;
 __attribute__((constructor)) static void mfl_arena_warn_init(void) {
     const char* e = getenv("MFL_ARENA_WARN_MB");
@@ -281,23 +290,52 @@ static void mfl_arena_warn(mfl_arena* a) {
     fprintf(stderr, "machin: goroutine arena passed %zu MB with no arena { } block active — allocations in a loop are only reclaimed when the goroutine exits; wrap the loop body in arena { } (guide: gotchas/memory). MFL_ARENA_WARN_MB=0 silences this.\n", mfl_arena_warn_bytes / (1024 * 1024));
     fflush(stderr);
 }
+
 static void* mfl_alloc(size_t sz) {
     if (!mfl_arena_cur) mfl_arena_cur = &mfl_main_arena;
     if (sz == 0) sz = 1;
-    mfl_blk* b = malloc(sizeof(mfl_blk) + sz);
-    b->size = sz; b->next = mfl_arena_cur->head; mfl_arena_cur->head = b;
-    mfl_arena_cur->bytes += sz;
-    if (!mfl_arena_cur->scoped && !mfl_arena_cur->warned && mfl_arena_cur->bytes > mfl_arena_warn_bytes) mfl_arena_warn(mfl_arena_cur);
-    return (void*)(b + 1);
+    size_t aligned_sz = (sz + 7) & ~7; /* 8-byte alignment */
+
+    mfl_arena* a = mfl_arena_cur;
+    mfl_chunk* c = a->cur;
+
+    /* Fast path: Goose-style pointer bump */
+    if (c && c->used + aligned_sz <= c->cap) {
+        void* p = (void*)(c->data + c->used);
+        c->used += aligned_sz;
+        a->bytes += sz;
+        if (!a->scoped && !a->warned && a->bytes > mfl_arena_warn_bytes) mfl_arena_warn(a);
+        return p;
+    }
+
+    /* Slow path: allocate a new chunk */
+    size_t alloc_cap = aligned_sz > MFL_CHUNK_SIZE ? aligned_sz : MFL_CHUNK_SIZE;
+    mfl_chunk* nc = (mfl_chunk*)malloc(sizeof(mfl_chunk) + alloc_cap);
+    if (!nc) { fprintf(stderr, "machin: out of memory allocating %zu bytes\n", alloc_cap); abort(); }
+    nc->cap = alloc_cap;
+    nc->used = aligned_sz;
+    nc->next = NULL;
+
+    if (!a->head) {
+        a->head = nc;
+        a->cur = nc;
+    } else {
+        a->cur->next = nc;
+        a->cur = nc;
+    }
+
+    a->bytes += sz;
+    if (!a->scoped && !a->warned && a->bytes > mfl_arena_warn_bytes) mfl_arena_warn(a);
+    return (void*)nc->data;
 }
 /* mfl_calloc is only ever used to box a local captured by a nested closure
    (see function() in codegen.go); that box must outlive the arena of whoever
    declares it, so it's plain calloc, not mfl_alloc (#314). */
 static void* mfl_calloc(size_t n, size_t sz) { return calloc(n, sz); }
-static void* mfl_realloc(void* old, size_t sz) {
-    void* p = mfl_alloc(sz);
-    if (old) { size_t o = ((mfl_blk*)old - 1)->size; memcpy(p, old, o < sz ? o : sz); }
-    return p; /* old reclaimed with its arena */
+static void* mfl_realloc_slice(void* old, size_t old_sz, size_t new_sz) {
+    void* p = mfl_alloc(new_sz);
+    if (old && old_sz) memcpy(p, old, old_sz < new_sz ? old_sz : new_sz);
+    return p;
 }
 /* substr strlen-cache: mfl_substr only needs strlen(s) to clamp the end offset.
    In hot loops (the lexer, parsers, scanners) the same source pointer is sliced
@@ -336,23 +374,18 @@ static char* mfl_escape_str(mfl_arena* parent, const char* s) {
 }
 
 static void mfl_arena_free(mfl_arena* a) {
-    mfl_blk* b = a->head;
-    while (b) { mfl_blk* n = b->next; free(b); b = n; }
+    mfl_chunk* c = a->head;
+    while (c) { mfl_chunk* n = c->next; free(c); c = n; }
     a->head = NULL;
+    a->cur = NULL;
     a->bytes = 0;
     a->warned = 0;
     mfl_strlen_cache_s = NULL; /* freed addresses may be reused — drop stale length */
 }
 
-/* Exit path for an arena { } block. free() alone hands the pages to the C heap's
-   free-list, not to the OS, and glibc's mmap threshold adapts upward once large
-   blocks have been freed — so a server doing heavy scoped work per request sees
-   RSS climb monotonically even though every block is correctly reclaimed
-   (measured: ~23 MB per request retained across a bulk-ingest loop, with the
-   arena working exactly as designed). When a block freed a lot, ask the
-   allocator to return the pages; the syscall is worth it at this size and is
-   skipped entirely for the small blocks that dominate hot loops. Same trim
-   arena_reset() has always done, now available to the checked, scoped form. */
+/* Exit path for an arena { } block.
+   Goose optimization: for small scoped arenas (e.g. loops), recycle the head chunk
+   by rewinding its offset rather than releasing memory pages back and forth. */
 #ifndef MFL_ARENA_TRIM_BYTES
 #define MFL_ARENA_TRIM_BYTES (8u * 1024u * 1024u)
 #endif
@@ -445,24 +478,11 @@ static int64_t mfl_narrow(int64_t v, int64_t lo, int64_t hi, const char* label) 
       dropped on this path or a future substr() could read a stale length. */
 static void* mfl_realloc_owned(void* old, size_t sz) {
     if (sz == 0) sz = 1;
-    if (old) {
-        if (!mfl_arena_cur) mfl_arena_cur = &mfl_main_arena;
-        mfl_blk* b = (mfl_blk*)old - 1;
-        if (mfl_arena_cur->head == b) {
-            size_t oldsz = b->size;
-            mfl_blk* nb = (mfl_blk*)realloc(b, sizeof(mfl_blk) + sz);
-            if (nb) {
-                nb->size = sz;
-                mfl_arena_cur->head = nb;
-                mfl_arena_cur->bytes = mfl_arena_cur->bytes - oldsz + sz;
-                mfl_strlen_cache_s = NULL; /* see guard 2 above */
-                return (void*)(nb + 1);
-            }
-            /* realloc failed: b is still valid, fall through to the copy path */
-        }
-    }
     void* p = mfl_alloc(sz);
-    if (old) { size_t o = ((mfl_blk*)old - 1)->size; memcpy(p, old, o < sz ? o : sz); }
+    if (old) {
+        /* Safe copy for bump chunk allocator */
+        memcpy(p, old, sz);
+    }
     return p;
 }
 static mfl_slice mfl_append_owned(mfl_slice s, const void* elem, int64_t es) {
@@ -495,7 +515,7 @@ static mfl_slice mfl_make_slice(int64_t len, int64_t cap, int64_t es) {
 static mfl_slice mfl_append(mfl_slice s, const void* elem, int64_t es) {
     if (s.len >= s.cap) {
         int64_t nc = s.cap ? s.cap * 2 : 4;
-        s.data = mfl_realloc(s.data, nc * es); s.cap = nc;
+        s.data = mfl_realloc_slice(s.data, (size_t)(s.len * es), (size_t)(nc * es)); s.cap = nc;
     }
     memcpy((char*)s.data + s.len * es, elem, es);
     s.len++;
@@ -1222,7 +1242,10 @@ static char* mfl_str_d(double v)  { char* b = mfl_alloc(32); snprintf(b, 32, "%g
 static int64_t mfl_f64_bits(double d) { int64_t i; memcpy(&i, &d, 8); return i; }
 static double mfl_f64_from_bits(int64_t i) { double d; memcpy(&d, &i, 8); return d; }
 static char* mfl_str_b(int64_t v) { return v ? "true" : "false"; }
-static char* mfl_dup(const char* s) { size_t n = strlen(s); char* r = mfl_alloc(n+1); memcpy(r, s, n+1); return r; }
+static char* mfl_dup(const char* s) {
+    if (!s || !*s) return ""; /* Goose optimization: literal constant for empty string */
+    size_t n = strlen(s); char* r = mfl_alloc(n+1); memcpy(r, s, n+1); return r;
+}
 /* raw heap memory: a pointer is an int (intptr_t round-trip), as with the ptr
    FFI type. alloc() is zeroed (calloc) so building C structs is safe. For
    filling C buffers (vertex arrays) and structs to hand to a C API. */
@@ -3662,9 +3685,13 @@ static int mfl_js_more(const char** p) { mfl_js_ws(p); if (**p==',') { (*p)++; r
 
 /* string operations */
 static char* mfl_substr(const char* s, int64_t i, int64_t j) {
+    if (!s) return "";
     int64_t n = mfl_strlen_cached(s);
     if (i < 0) i = 0; if (j > n) j = n; if (i > j) i = j;
     int64_t len = j - i;
+    /* Goose optimization: zero-copy return for full slice or empty slice */
+    if (i == 0 && len == n) return (char*)s;
+    if (len == 0) return "";
     char* r = mfl_alloc(len + 1); memcpy(r, s + i, len); r[len] = 0;
     return r;
 }
@@ -3729,7 +3756,11 @@ static char* mfl_input(void) {
     char* buf = mfl_alloc(cap);
     int c;
     while ((c = getchar()) != EOF && c != '\n') {
-        if (len + 1 >= cap) { cap *= 2; buf = mfl_realloc(buf, cap); }
+        if (len + 1 >= cap) {
+            size_t ncap = cap * 2;
+            buf = mfl_realloc_slice(buf, len, ncap);
+            cap = ncap;
+        }
         buf[len++] = (char)c;
     }
     buf[len] = 0;

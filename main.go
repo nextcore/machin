@@ -108,6 +108,9 @@ func main() {
 		err = cmdCheckTest(os.Args[2:]) // self-hosting oracle (selfhost/): dump inferred types
 	case "framework":
 		err = cmdFramework(os.Args[2:])
+	case "version", "-v", "--version":
+		fmt.Printf("machin %s (Goose-inspired chunk bump arena)\n", machinVersion)
+		return
 	case "help", "-h", "--help":
 		usage()
 	default:
@@ -140,6 +143,7 @@ usage:
   machin pack  <file.mfl>            emit the dense base64 form (distribution)
   machin guide                       full feature catalog as JSON (--text for prose)
   machin skill install               register the agent skills where coding agents look
+  machin version                     print toolchain version
 
 Agents: run "machin guide" for the complete, version-exact feature surface —
 keywords, every builtin with signature, idioms, and gotchas — in one call.
