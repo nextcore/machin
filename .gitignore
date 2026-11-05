@@ -8,3 +8,4 @@ coverage.html
 # self-hosted oracle binaries (built by the verify-*.sh gates)
 selfhost/mfl-*
 *.exe
+/ref/
