@@ -308,6 +308,9 @@ func BuildBinaryStatic(prog *Program, outPath string, safe, static bool) error {
 	if strings.Contains(csrc, "mfl_ocl_init") && runtime.GOOS == "linux" {
 		libs = append(libs, "-ldl")
 	}
+	if runtime.GOOS == "windows" && (strings.Contains(csrc, "WSAStartup") || strings.Contains(csrc, "mfl_dial") || strings.Contains(csrc, "mfl_listen")) {
+		libs = append(libs, "-lws2_32")
+	}
 	args = append(args, "-o", outPath, tmp.Name())
 	args = append(args, srcs...)
 	args = append(args, libs...)
