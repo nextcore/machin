@@ -276,6 +276,8 @@ typedef struct {
     int warned;
 } mfl_arena;
 
+static _Thread_local mfl_chunk* mfl_recycled_chunk = NULL;
+
 static mfl_arena mfl_main_arena = { NULL, NULL, 0, 0, 0 };
 static _Thread_local mfl_arena* mfl_arena_cur = NULL;
 
@@ -308,9 +310,15 @@ static void* mfl_alloc(size_t sz) {
         return p;
     }
 
-    /* Slow path: allocate a new chunk */
+    /* Slow path: allocate a new chunk or take from recycled head chunk */
     size_t alloc_cap = aligned_sz > MFL_CHUNK_SIZE ? aligned_sz : MFL_CHUNK_SIZE;
-    mfl_chunk* nc = (mfl_chunk*)malloc(sizeof(mfl_chunk) + alloc_cap);
+    mfl_chunk* nc = NULL;
+    if (alloc_cap == MFL_CHUNK_SIZE && mfl_recycled_chunk) {
+        nc = mfl_recycled_chunk;
+        mfl_recycled_chunk = NULL;
+    } else {
+        nc = (mfl_chunk*)malloc(sizeof(mfl_chunk) + alloc_cap);
+    }
     if (!nc) { fprintf(stderr, "machin: out of memory allocating %zu bytes\n", alloc_cap); abort(); }
     nc->cap = alloc_cap;
     nc->used = aligned_sz;
@@ -391,6 +399,18 @@ static void mfl_arena_free(mfl_arena* a) {
 #endif
 static void mfl_arena_free_scoped(mfl_arena* a) {
     size_t had = a->bytes;
+    /* Goose optimization: if this scoped arena used exactly one standard chunk and nothing is cached yet, recycle it */
+    if (a->head && a->head == a->cur && a->head->cap == MFL_CHUNK_SIZE && !mfl_recycled_chunk) {
+        mfl_recycled_chunk = a->head;
+        mfl_recycled_chunk->used = 0;
+        mfl_recycled_chunk->next = NULL;
+        a->head = NULL;
+        a->cur = NULL;
+        a->bytes = 0;
+        a->warned = 0;
+        mfl_strlen_cache_s = NULL;
+        return;
+    }
     mfl_arena_free(a);
 #ifdef __GLIBC__
     if (had >= MFL_ARENA_TRIM_BYTES) malloc_trim(0);
@@ -478,10 +498,20 @@ static int64_t mfl_narrow(int64_t v, int64_t lo, int64_t hi, const char* label) 
       dropped on this path or a future substr() could read a stale length. */
 static void* mfl_realloc_owned(void* old, size_t sz) {
     if (sz == 0) sz = 1;
+    if (!mfl_arena_cur) mfl_arena_cur = &mfl_main_arena;
+    mfl_arena* a = mfl_arena_cur;
+    mfl_chunk* c = a->cur;
+    size_t aligned_sz = (sz + 7) & ~7;
+    /* In-place tip growth if old is at the tip of the current chunk */
+    if (c && old && (char*)old + ((sz >> 1) ? (sz >> 1) : 0) <= c->data + c->used && c->used + aligned_sz <= c->cap) {
+        c->used += aligned_sz;
+        a->bytes += sz;
+        return old;
+    }
     void* p = mfl_alloc(sz);
     if (old) {
-        /* Safe copy for bump chunk allocator */
-        memcpy(p, old, sz);
+        size_t prev_sz = sz >> 1;
+        if (prev_sz) memcpy(p, old, prev_sz);
     }
     return p;
 }
@@ -3441,8 +3471,15 @@ static mfl_bytes mfl_bytes_sub(mfl_bytes b, int64_t start, int64_t end) {
     if (end > b.len) end = b.len;
     if (end < start) end = start;
     int64_t n = end - start;
-    mfl_bytes r; r.len = n; r.data = (uint8_t*)mfl_alloc(n ? n : 1);
-    memcpy(r.data, b.data + start, (size_t)n);
+    if (n == 0) { mfl_bytes r = { NULL, 0 }; return r; }
+    /* Goose zero-copy slice optimization: return view without allocating */
+    if (b.data) {
+        mfl_bytes r;
+        r.len = n;
+        r.data = b.data + start;
+        return r;
+    }
+    mfl_bytes r; r.len = n; r.data = (uint8_t*)mfl_alloc(n);
     return r;
 }
 /* find needle in haystack at or after start, NUL-safe; -1 if absent. For binary
@@ -3456,6 +3493,24 @@ static int64_t mfl_bytes_index(mfl_bytes h, mfl_bytes nd, int64_t from) {
     return -1;
 }
 static mfl_bytes mfl_bytes_concat(mfl_bytes a, mfl_bytes b) {
+    if (a.len == 0) return b;
+    if (b.len == 0) return a;
+    if (!mfl_arena_cur) mfl_arena_cur = &mfl_main_arena;
+    mfl_arena* ar = mfl_arena_cur;
+    mfl_chunk* c = ar->cur;
+
+    /* Goose optimization: if 'a' is at the very tip of the current chunk, append in place */
+    size_t aligned_b = ((size_t)b.len + 7) & ~7;
+    if (c && a.data && (char*)a.data + a.len == c->data + c->used && c->used + aligned_b <= c->cap) {
+        memcpy(c->data + c->used, b.data, (size_t)b.len);
+        c->used += aligned_b;
+        ar->bytes += b.len;
+        mfl_bytes r;
+        r.len = a.len + b.len;
+        r.data = a.data;
+        return r;
+    }
+
     mfl_bytes r; r.len = a.len + b.len; r.data = (uint8_t*)mfl_alloc(r.len ? r.len : 1);
     memcpy(r.data, a.data, (size_t)a.len);
     memcpy(r.data + a.len, b.data, (size_t)b.len);

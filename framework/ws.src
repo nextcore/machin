@@ -97,8 +97,13 @@ func ws_fill(c, n) (ok) {
 
 // ws_take consumes and returns the first n buffered bytes.
 func ws_take(c, n) (b) {
+    total := len(c.buf[0])
     b = bytes_sub(c.buf[0], 0, n)
-    c.buf[0] = bytes_sub(c.buf[0], n, len(c.buf[0]))
+    if n >= total {
+        c.buf[0] = bytes("")
+    } else {
+        c.buf[0] = bytes_sub(c.buf[0], n, total)
+    }
 }
 
 // ws_recv reads one frame -> (opcode, payload, ok). Client frames are unmasked here.
