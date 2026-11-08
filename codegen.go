@@ -496,29 +496,30 @@ static int64_t mfl_narrow(int64_t v, int64_t lo, int64_t hi, const char* label) 
       only while the arena frees nothing mid-life. realloc hands an address back to
       the allocator, where a later malloc may reuse it — so the cache must be
       dropped on this path or a future substr() could read a stale length. */
-static void* mfl_realloc_owned(void* old, size_t sz) {
-    if (sz == 0) sz = 1;
+static void* mfl_realloc_owned(void* old, size_t old_sz, size_t new_sz) {
+    if (new_sz == 0) new_sz = 1;
     if (!mfl_arena_cur) mfl_arena_cur = &mfl_main_arena;
     mfl_arena* a = mfl_arena_cur;
     mfl_chunk* c = a->cur;
-    size_t aligned_sz = (sz + 7) & ~7;
+    size_t old_aligned = (old_sz + 7) & ~7;
+    size_t new_aligned = (new_sz + 7) & ~7;
     /* In-place tip growth if old is at the tip of the current chunk */
-    if (c && old && (char*)old + ((sz >> 1) ? (sz >> 1) : 0) <= c->data + c->used && c->used + aligned_sz <= c->cap) {
-        c->used += aligned_sz;
-        a->bytes += sz;
-        return old;
+    if (c && old && (char*)old + old_aligned == c->data + c->used) {
+        size_t diff = new_aligned - old_aligned;
+        if (c->used + diff <= c->cap) {
+            c->used += diff;
+            a->bytes += (new_sz > old_sz ? new_sz - old_sz : 0);
+            return old;
+        }
     }
-    void* p = mfl_alloc(sz);
-    if (old) {
-        size_t prev_sz = sz >> 1;
-        if (prev_sz) memcpy(p, old, prev_sz);
-    }
+    void* p = mfl_alloc(new_sz);
+    if (old && old_sz) memcpy(p, old, old_sz < new_sz ? old_sz : new_sz);
     return p;
 }
 static mfl_slice mfl_append_owned(mfl_slice s, const void* elem, int64_t es) {
     if (s.len >= s.cap) {
         int64_t nc = s.cap ? s.cap * 2 : 4;
-        s.data = mfl_realloc_owned(s.data, nc * es); s.cap = nc;
+        s.data = mfl_realloc_owned(s.data, (size_t)(s.len * es), (size_t)(nc * es)); s.cap = nc;
     }
     memcpy((char*)s.data + s.len * es, elem, es);
     s.len++;
