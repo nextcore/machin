@@ -274,11 +274,12 @@ typedef struct {
     size_t bytes;
     int scoped;
     int warned;
+    mfl_chunk* recycled;
+    const char* strlen_cache_s;
+    int64_t strlen_cache_n;
 } mfl_arena;
 
-static _Thread_local mfl_chunk* mfl_recycled_chunk = NULL;
-
-static mfl_arena mfl_main_arena = { NULL, NULL, 0, 0, 0 };
+static mfl_arena mfl_main_arena = { NULL, NULL, 0, 0, 0, NULL, NULL, 0 };
 static _Thread_local mfl_arena* mfl_arena_cur = NULL;
 
 /* Arena growth tripwire (#660). */
@@ -313,9 +314,9 @@ static void* mfl_alloc(size_t sz) {
     /* Slow path: allocate a new chunk or take from recycled head chunk */
     size_t alloc_cap = aligned_sz > MFL_CHUNK_SIZE ? aligned_sz : MFL_CHUNK_SIZE;
     mfl_chunk* nc = NULL;
-    if (alloc_cap == MFL_CHUNK_SIZE && mfl_recycled_chunk) {
-        nc = mfl_recycled_chunk;
-        mfl_recycled_chunk = NULL;
+    if (alloc_cap == MFL_CHUNK_SIZE && a->recycled) {
+        nc = a->recycled;
+        a->recycled = NULL;
     } else {
         nc = (mfl_chunk*)malloc(sizeof(mfl_chunk) + alloc_cap);
     }
@@ -352,13 +353,13 @@ static void* mfl_realloc_slice(void* old, size_t old_sz, size_t new_sz) {
    *live* strings never share an address (the arena frees nothing mid-life), so
    pointer identity ⇒ same length — but a freed block's address can be reused by a
    later malloc, so mfl_arena_free invalidates the cache. */
-static _Thread_local const char* mfl_strlen_cache_s = NULL;
-static _Thread_local int64_t mfl_strlen_cache_n = 0;
 static inline int64_t mfl_strlen_cached(const char* s) {
     if (s == NULL) return 0; /* NULL string (e.g. parse() missing field) is length 0, not a crash */
-    if (s == mfl_strlen_cache_s) return mfl_strlen_cache_n;
+    if (!mfl_arena_cur) mfl_arena_cur = &mfl_main_arena;
+    mfl_arena* a = mfl_arena_cur;
+    if (s == a->strlen_cache_s) return a->strlen_cache_n;
     int64_t n = (int64_t)strlen(s);
-    mfl_strlen_cache_s = s; mfl_strlen_cache_n = n;
+    a->strlen_cache_s = s; a->strlen_cache_n = n;
     return n;
 }
 /* escape(): copy a value OUT of the current scoped arena into the enclosing
@@ -384,11 +385,12 @@ static char* mfl_escape_str(mfl_arena* parent, const char* s) {
 static void mfl_arena_free(mfl_arena* a) {
     mfl_chunk* c = a->head;
     while (c) { mfl_chunk* n = c->next; free(c); c = n; }
+    if (a->recycled) { free(a->recycled); a->recycled = NULL; }
     a->head = NULL;
     a->cur = NULL;
     a->bytes = 0;
     a->warned = 0;
-    mfl_strlen_cache_s = NULL; /* freed addresses may be reused — drop stale length */
+    a->strlen_cache_s = NULL; /* freed addresses may be reused — drop stale length */
 }
 
 /* Exit path for an arena { } block.
@@ -397,19 +399,22 @@ static void mfl_arena_free(mfl_arena* a) {
 #ifndef MFL_ARENA_TRIM_BYTES
 #define MFL_ARENA_TRIM_BYTES (8u * 1024u * 1024u)
 #endif
-static void mfl_arena_free_scoped(mfl_arena* a) {
+static void mfl_arena_free_scoped(mfl_arena* a, mfl_arena* par) {
     size_t had = a->bytes;
-    /* Goose optimization: if this scoped arena used exactly one standard chunk and nothing is cached yet, recycle it */
-    if (a->head && a->head == a->cur && a->head->cap == MFL_CHUNK_SIZE && !mfl_recycled_chunk) {
-        mfl_recycled_chunk = a->head;
-        mfl_recycled_chunk->used = 0;
-        mfl_recycled_chunk->next = NULL;
-        a->head = NULL;
-        a->cur = NULL;
-        a->bytes = 0;
-        a->warned = 0;
-        mfl_strlen_cache_s = NULL;
-        return;
+    /* Goose optimization: if this scoped arena used exactly one standard chunk and nothing is cached yet, recycle it into parent */
+    if (a->head && a->head == a->cur && a->head->cap == MFL_CHUNK_SIZE) {
+        if (!par) par = &mfl_main_arena;
+        if (!par->recycled) {
+            par->recycled = a->head;
+            par->recycled->used = 0;
+            par->recycled->next = NULL;
+            a->head = NULL;
+            a->cur = NULL;
+            a->bytes = 0;
+            a->warned = 0;
+            a->strlen_cache_s = NULL;
+            return;
+        }
     }
     mfl_arena_free(a);
 #ifdef __GLIBC__
@@ -7256,7 +7261,7 @@ func (g *cgen) stmt(s Stmt, depth int) error {
 		}
 		g.arenaStack = g.arenaStack[:len(g.arenaStack)-1]
 		indentC(&g.buf, depth)
-		fmt.Fprintf(&g.buf, "mfl_arena_cur = _sp%d; mfl_arena_free_scoped(&_sa%d); }\n", id, id)
+		fmt.Fprintf(&g.buf, "mfl_arena_cur = _sp%d; mfl_arena_free_scoped(&_sa%d, _sp%d); }\n", id, id, id)
 	case *GoStmt:
 		return g.goStmt(st)
 	default:
