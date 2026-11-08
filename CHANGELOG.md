@@ -1,6 +1,6 @@
 # Changelog
 
-## v0.141.0-goose
+## v0.140.0-2
 
 **Goose-Inspired Chunked Bump Arena & Zero-Copy String Optimizations.**
 - Ganti linked-list malloc per-objek dengan 64 KB Chunky Bump Allocator (alokasi fast-path 1 clock CPU, ~3x lebih cepat).
