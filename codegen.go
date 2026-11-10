@@ -253,10 +253,10 @@ typedef struct { void* data; int64_t len; int64_t cap; } mfl_slice;
 /* closures: a function pointer plus a heap environment of captured values */
 typedef struct { void* fn; void* env; } mfl_closure;
 
-/* ---- arena memory management (Goose-inspired Chunky Bump Allocator) ----
+/* ---- arena memory management (Gojo-inspired Linear Drop & Tip-Rewind Allocator) ----
    Value buffers (strings, slice backings, closure environments) are allocated
-   from a per-goroutine chunked bump arena and reclaimed in bulk when the goroutine
-   finishes or arena_reset is called. Subsystems that free explicitly (channels, maps,
+   from a per-goroutine chunked bump arena and reclaimed automatically on variable last-use
+   or when the goroutine finishes. Subsystems that free explicitly (channels, maps,
    goroutine args) use raw malloc/free. */
 #define MFL_CHUNK_SIZE (64u * 1024u) /* 64 KB chunk default (keeps chunks below glibc mmap threshold) */
 

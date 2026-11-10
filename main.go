@@ -109,7 +109,7 @@ func main() {
 	case "framework":
 		err = cmdFramework(os.Args[2:])
 	case "version", "-v", "--version":
-		fmt.Printf("machin %s (Goose-inspired chunk bump arena)\n", machinVersion)
+		fmt.Printf("machin %s (Gojo-inspired memory safety & drop-on-last-use)\n", machinVersion)
 		return
 	case "help", "-h", "--help":
 		usage()
