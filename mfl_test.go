@@ -923,6 +923,25 @@ func TestSQLiteParams(t *testing.T) {
 	}
 }
 
+// #672: sqlite_query must distinguish SQL failure from a valid empty result —
+// "" means broken (sqlite_errmsg says why), "[]" means zero rows.
+func TestSQLiteQueryError(t *testing.T) {
+	main := `func main() {
+	db := sqlite_open(":memory:")
+	sqlite_exec(db, "CREATE TABLE t(a int)")
+	bad := sqlite_query(db, "SELECT a AS isnull FROM t")
+	el := len(sqlite_errmsg(db))
+	empty := sqlite_query(db, "SELECT a AS a FROM t WHERE a = 999")
+	println(str(len(bad)) + " " + str(len(empty)) + " " + str(el))
+	sqlite_close(db)
+}`
+	out, _ := buildRun(t, main)
+	fields := strings.Fields(out)
+	if len(fields) != 3 || fields[0] != "0" || fields[1] != "2" || fields[2] == "0" {
+		t.Fatalf("sqlite error signaling: got %q, want '0 2 <nonzero>'", out)
+	}
+}
+
 // url_encode follows RFC 3986 (space -> %20, reserved chars escaped, unreserved
 // kept); url_decode reverses it and also treats '+' as space.
 func TestURLEncoding(t *testing.T) {
@@ -1386,6 +1405,25 @@ func TestFileRawRoundtrip(t *testing.T) {
 	out, _ := buildRun(t, main)
 	if out != "32 32 12345 67890 3.5\n" {
 		t.Fatalf("write/read_file_raw: got %q", out)
+	}
+}
+
+// #668: procfs/sysfs files report st_size 0 but yield bytes on read — read_file
+// and read_file_bytes must read to EOF, not trust the size. /proc is Linux-only;
+// skip elsewhere (the stat guard keeps this portable, no runtime import needed).
+func TestReadFileProcfs(t *testing.T) {
+	if _, err := os.Stat("/proc/self/status"); err != nil {
+		t.Skip("no procfs")
+	}
+	main := `func main() {
+	txt := read_file("/proc/self/status")
+	b := read_file_bytes("/proc/self/status")
+	println(str(len(txt)) + " " + str(len(b)))
+}`
+	out, _ := buildRun(t, main)
+	fields := strings.Fields(out)
+	if len(fields) != 2 || fields[0] != fields[1] || fields[0] == "0" {
+		t.Fatalf("procfs read: got %q, want two equal nonzero lengths", out)
 	}
 }
 

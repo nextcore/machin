@@ -3970,12 +3970,23 @@ static char* mfl_read_file(const char* path) {
     if (mfl_is_dir(path)) { if (mfl_rr_mode == 1) mfl_rr_io_log_bytes("", 0); return mfl_dup(""); }
     FILE* f = fopen(path, "rb");
     if (!f) { if (mfl_rr_mode == 1) mfl_rr_io_log_bytes("", 0); return mfl_dup(""); }
+    /* #668: procfs/sysfs report st_size 0 but yield bytes on read, so ftell is
+       only a capacity hint — read to EOF in a growable buffer (also safe when a
+       file grows between stat and read). */
     fseek(f, 0, SEEK_END); long n = ftell(f); fseek(f, 0, SEEK_SET);
     if (n < 0) n = 0;
-    char* buf = mfl_alloc((size_t)n + 1);
-    size_t r = fread(buf, 1, (size_t)n, f); buf[r] = 0;
+    size_t cap = (size_t)n + 4096, len = 0;
+    char* tmp = (char*)malloc(cap);
+    for (;;) {
+        if (len == cap) { cap *= 2; tmp = (char*)realloc(tmp, cap); }
+        size_t r = fread(tmp + len, 1, cap - len, f);
+        len += r;
+        if (r == 0) break;
+    }
     fclose(f);
-    if (mfl_rr_mode == 1) mfl_rr_io_log_bytes(buf, r);
+    char* buf = mfl_alloc(len + 1);
+    memcpy(buf, tmp, len); buf[len] = 0; free(tmp);
+    if (mfl_rr_mode == 1) mfl_rr_io_log_bytes(buf, len);
     return buf;
 }
 static int64_t mfl_write_file(const char* path, const char* content) {
@@ -4072,11 +4083,23 @@ static mfl_bytes mfl_read_file_bytes(const char* path) {
     if (mfl_is_dir(path)) { if (mfl_rr_mode == 1) mfl_rr_io_log_bytes("", 0); return b; }
     FILE* f = fopen(path, "rb");
     if (!f) { if (mfl_rr_mode == 1) mfl_rr_io_log_bytes("", 0); return b; }
+    /* #668: same read-to-EOF loop as mfl_read_file — procfs/sysfs files report
+       size 0 but yield bytes on read. */
     fseek(f, 0, SEEK_END); long n = ftell(f); fseek(f, 0, SEEK_SET);
     if (n < 0) n = 0;
-    b.data = (uint8_t*)mfl_alloc((size_t)n ? (size_t)n : 1);
-    b.len = (int64_t)fread(b.data, 1, (size_t)n, f);
+    size_t cap = (size_t)n + 4096, len = 0;
+    uint8_t* tmp = (uint8_t*)malloc(cap);
+    for (;;) {
+        if (len == cap) { cap *= 2; tmp = (uint8_t*)realloc(tmp, cap); }
+        size_t r = fread(tmp + len, 1, cap - len, f);
+        len += r;
+        if (r == 0) break;
+    }
     fclose(f);
+    b.data = (uint8_t*)mfl_alloc(len ? len : 1);
+    if (len) memcpy(b.data, tmp, len);
+    b.len = (int64_t)len;
+    free(tmp);
     if (mfl_rr_mode == 1) mfl_rr_io_log_bytes((char*)b.data, (size_t)b.len);
     return b;
 }
@@ -5701,14 +5724,15 @@ static void mfl_sqlite_bind(sqlite3_stmt* st, mfl_slice params) {
     }
 }
 /* step a prepared statement to completion, returning a JSON array of row
-   objects; finalizes the statement. */
+   objects; finalizes the statement. Returns NULL on a step error so the
+   caller can tell failure from a legitimately empty result (#672). */
 static char* mfl_sqlite_rows_json(sqlite3_stmt* st) {
     size_t cap = 256, len = 0;
     char* out = (char*)malloc(cap);
     out[len++] = '[';
     int ncol = sqlite3_column_count(st);
-    int row = 0;
-    while (sqlite3_step(st) == SQLITE_ROW) {
+    int row = 0, rc = SQLITE_DONE;
+    while ((rc = sqlite3_step(st)) == SQLITE_ROW) {
         if (row++) { if (len + 1 >= cap) { cap *= 2; out = realloc(out, cap); } out[len++] = ','; }
         if (len + 1 >= cap) { cap *= 2; out = realloc(out, cap); }
         out[len++] = '{';
@@ -5738,23 +5762,36 @@ static char* mfl_sqlite_rows_json(sqlite3_stmt* st) {
     if (len + 1 >= cap) { cap *= 2; out = realloc(out, cap); }
     out[len++] = ']';
     sqlite3_finalize(st);
+    if (rc != SQLITE_DONE) { free(out); return NULL; }
     char* r = mfl_dup_arena(out, len);
     free(out);
     return r;
 }
+/* #672: sqlite_query returns "" on failure — "[]" is reserved for a valid
+   query with zero rows. sqlite_errmsg(db) says why. */
 static char* mfl_sqlite_query(int64_t h, const char* sql) {
     sqlite3* db = (sqlite3*)(intptr_t)h;
     sqlite3_stmt* st = NULL;
-    if (!db || sqlite3_prepare_v2(db, sql, -1, &st, NULL) != SQLITE_OK) return mfl_dup_arena("[]", 2);
-    return mfl_sqlite_rows_json(st);
+    if (!db || sqlite3_prepare_v2(db, sql, -1, &st, NULL) != SQLITE_OK) return mfl_dup_arena("", 0);
+    char* r = mfl_sqlite_rows_json(st);
+    return r ? r : mfl_dup_arena("", 0);
 }
 /* parameterized variants: bind a []string of params to the ? placeholders. */
 static char* mfl_sqlite_query_p(int64_t h, const char* sql, mfl_slice params) {
     sqlite3* db = (sqlite3*)(intptr_t)h;
     sqlite3_stmt* st = NULL;
-    if (!db || sqlite3_prepare_v2(db, sql, -1, &st, NULL) != SQLITE_OK) return mfl_dup_arena("[]", 2);
+    if (!db || sqlite3_prepare_v2(db, sql, -1, &st, NULL) != SQLITE_OK) return mfl_dup_arena("", 0);
     mfl_sqlite_bind(st, params);
-    return mfl_sqlite_rows_json(st);
+    char* r = mfl_sqlite_rows_json(st);
+    return r ? r : mfl_dup_arena("", 0);
+}
+/* the db handle's most recent error message — pair with sqlite_query ""
+   results and nonzero sqlite_exec codes. "" for a bad handle. */
+static char* mfl_sqlite_errmsg(int64_t h) {
+    sqlite3* db = (sqlite3*)(intptr_t)h;
+    if (!db) return mfl_dup_arena("", 0);
+    const char* m = sqlite3_errmsg(db);
+    return mfl_dup_arena(m ? m : "", m ? strlen(m) : 0);
 }
 static int64_t mfl_sqlite_exec_p(int64_t h, const char* sql, mfl_slice params) {
     sqlite3* db = (sqlite3*)(intptr_t)h;
@@ -9209,6 +9246,9 @@ func (g *cgen) callBody(ex *Call, args []string) (string, error) {
 			return fmt.Sprintf("mfl_sqlite_query_p(%s, %s, %s)", args[0], args[1], args[2]), nil
 		}
 		return fmt.Sprintf("mfl_sqlite_query(%s, %s)", args[0], args[1]), nil
+	case "sqlite_errmsg":
+		g.usesSQLite = true
+		return fmt.Sprintf("mfl_sqlite_errmsg(%s)", args[0]), nil
 	case "sqlite_close":
 		g.usesSQLite = true
 		return fmt.Sprintf("mfl_sqlite_close(%s)", args[0]), nil
