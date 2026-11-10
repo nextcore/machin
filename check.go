@@ -196,7 +196,7 @@ func analyzeSourceSpan(combined string, srcNames []string, files []DiagFile) Che
 					warns = append(warns, d)
 				}
 
-			// ownership phase: Gojo-inspired compile-time ownership and use-after-move checks
+			// ownership phase: compile-time ownership and use-after-move checks
 			ownDiags, _ := AnalyzeOwnership(prog, c)
 			for _, od := range ownDiags {
 				diags = append(diags, Diagnostic{

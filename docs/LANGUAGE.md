@@ -782,7 +782,7 @@ See `examples/complex/http_client_api.mfl` for the full runnable example.
 
 ## Memory management & arenas
 
-Machin uses a per-goroutine chunked bump arena allocator, combined with automatic compile-time liveness tracking (Gojo-inspired drop-on-last-use).
+Machin uses a per-goroutine chunked bump arena allocator, combined with automatic compile-time liveness tracking (drop-on-last-use).
 
 ### Automatic Drop-on-Last-Use (v0.140.0-3+)
 The compiler tracks the lifetime of local allocations (strings and slices) and automatically emits `mfl_release` immediately after their last-use statement. If the deallocated value resides at the current allocation tip of the active 64 KB chunk, the bump allocator rewinds its tip in $O(1)$ time (`c->used -= aligned_sz`).

@@ -139,7 +139,7 @@ type cgen struct {
 	globals      map[string]bool // package-global names (emitted as C statics, mfl_g_<name>)
 	bodyOnly     bool            // oracle mode: emit only the program-specific C (skip the static runtime blocks)
 	probeVars    []string        // `machin replay --print <var>`: emit a probe after each assignment to these vars
-	liveness     map[*FuncDecl]*LivenessInfo // Gojo-inspired compile-time liveness mapping
+	liveness     map[*FuncDecl]*LivenessInfo // compile-time liveness mapping
 }
 
 // debugProbeVars is set by `machin replay --print` just before it (re)builds the recorded
@@ -253,7 +253,7 @@ typedef struct { void* data; int64_t len; int64_t cap; } mfl_slice;
 /* closures: a function pointer plus a heap environment of captured values */
 typedef struct { void* fn; void* env; } mfl_closure;
 
-/* ---- arena memory management (Gojo-inspired Linear Drop & Tip-Rewind Allocator) ----
+/* ---- arena memory management (Linear Drop & Tip-Rewind Allocator) ----
    Value buffers (strings, slice backings, closure environments) are allocated
    from a per-goroutine chunked bump arena and reclaimed automatically on variable last-use
    or when the goroutine finishes. Subsystems that free explicitly (channels, maps,
@@ -340,7 +340,7 @@ static void* mfl_alloc(size_t sz) {
     return (void*)nc->data;
 }
 
-/* mfl_release / tip-rewind (Gojo-inspired drop-on-last-use):
+/* mfl_release / tip-rewind (drop-on-last-use):
    Jika pointer yang dibebaskan adalah alokasi paling terakhir pada chunk aktif,
    kita bisa langsung memundurkan pointer bump alokator (0-cost recycling). */
 static void mfl_release(void* p, size_t sz) {

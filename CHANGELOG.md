@@ -10,7 +10,7 @@
 
 ## v0.140.0-3
 
-**Gojo-Inspired Memory Safety, Drop-on-Last-Use & Liveness Analysis.**
+**Compile-Time Liveness, Drop-on-Last-Use & Memory Recycling.**
 - Static ownership and liveness analysis: recursive last-use instruction tracking for local allocations (`string` and `slice`) across `if`, `while`, and `range` blocks.
 - Automated drop codegen: automatic injection of `mfl_release` at last-use points, rewinding the bump allocator tip in $O(1)$ to prevent memory leaks in loops without requiring manual `arena { }` wrapping.
 - Compile-time Use-After-Move detection (`OWN002`) for channel sends (`ch <- v`), integrated into `machin check --json`.

@@ -1,6 +1,6 @@
 package main
 
-// Liveness and Ownership Analysis (Gojo-inspired).
+// Liveness and Ownership Analysis.
 //
 // Melacak penggunaan variabel lokal dalam suatu fungsi untuk menentukan:
 // 1. Titik penggunaan terakhir (Last-Use point) dari variabel bertipe buffer/string/slice/map/struct.
