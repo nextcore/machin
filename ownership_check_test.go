@@ -107,3 +107,4 @@ func main() { test_move() }
 		t.Fatalf("expected OWN002 for msg, got %v", diags)
 	}
 }
+
