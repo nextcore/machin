@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.140.0-3
+
+**Gojo-Inspired Memory Safety, Drop-on-Last-Use & Liveness Analysis.**
+- Analisis ownership & liveness statis: pelacakan instruksi last-use variabel lokal (`string` dan `slice`) melintasi percabangan (`if`), perulangan (`while`), dan `range`.
+- Otomatisasi pembebasan memori C codegen: emisi otomatis `mfl_release` tepat saat titik last-use tercapai, memundurkan pointer bump allocator (*tip-rewind* $O(1)$) untuk mencegah memory blowup di loop panjang tanpa manual `arena { }`.
+- Deteksi *Use-After-Move* (`OWN002`) pada kanal `ch <- v` yang terintegrasi langsung dengan `machin check --json`.
+- Zero-copy slice borrow: optimasi `mfl_subslice` untuk peminjaman range penuh tanpa duplikasi alokasi memori.
+
 ## v0.140.0-2
 
 **Goose-Inspired Chunked Bump Arena & Zero-Copy String Optimizations.**

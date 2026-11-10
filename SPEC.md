@@ -1,6 +1,6 @@
 # The MFL Language Specification
 
-Version 0.140.0-2 (Goose-Inspired Chunk Bump Memory)
+Version 0.140.0-3 (Gojo-Inspired Memory Safety & Liveness)
 
 MFL (Machine-First Language) is a statically-typed, Go-flavored backend language
 **shaped for machine authoring**: minimal syntax, no type annotations, one
