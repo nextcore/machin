@@ -77,35 +77,78 @@ func analyzeFuncOwnership(fn *FuncDecl, c *Checker) (*LivenessInfo, []OwnershipD
 	// 1. Hitung kemunculan pembacaan setiap variabel lokal
 	// Var -> daftar urutan statement yang mengaksesnya
 	accessMap := make(map[string][]Stmt)
+	escaped := make(map[string]bool)
 
-	var scanStmts func(stmts []Stmt)
-	scanStmts = func(stmts []Stmt) {
+	// Tandai variabel yang di-box oleh closure sebagai escaping
+	if fn.Boxed != nil {
+		for v := range fn.Boxed {
+			escaped[v] = true
+		}
+	}
+
+	// Buat map global untuk deteksi assignment ke global
+	globalSet := make(map[string]bool)
+	if c != nil {
+		for _, g := range c.GlobalOrder() {
+			globalSet[g] = true
+		}
+	}
+
+	var scanStmts func(stmts []Stmt, inLoop bool)
+	scanStmts = func(stmts []Stmt, inLoop bool) {
 		for _, stmt := range stmts {
 			readVars := collectReadIdents(stmt)
 			for v := range readVars {
 				if isLocalVariable(fn, v) {
 					accessMap[v] = append(accessMap[v], stmt)
+					if inLoop {
+						// Variabel yang diakses di dalam loop tidak boleh di-drop di dalam loop
+						// karena iterasi berikutnya masih berpotensi menggunakannya.
+						escaped[v] = true
+					}
 				}
 			}
+
+			// Deteksi escape:
+			// a) Assign ke variabel global (misal: g_config = local_data)
+			if as, ok := stmt.(*AssignStmt); ok {
+				if globalSet[as.Name] {
+					vReads := collectReadIdents(as)
+					for rv := range vReads {
+						escaped[rv] = true
+					}
+				}
+			}
+			// b) Return statement: nilai yang dikembalikan keluar dari fungsi
+			if ret, ok := stmt.(*ReturnStmt); ok {
+				vReads := collectReadIdents(ret)
+				for rv := range vReads {
+					escaped[rv] = true
+				}
+			}
+
 			// Rekursif ke dalam blok if, while, for-range
 			switch s := stmt.(type) {
 			case *IfStmt:
-				scanStmts(s.Then)
-				scanStmts(s.Else)
+				scanStmts(s.Then, inLoop)
+				scanStmts(s.Else, inLoop)
 			case *WhileStmt:
-				scanStmts(s.Body)
+				scanStmts(s.Body, true)
 			case *RangeStmt:
-				scanStmts(s.Body)
+				scanStmts(s.Body, true)
 			case *ArenaStmt:
-				scanStmts(s.Body)
+				scanStmts(s.Body, inLoop)
 			}
 		}
 	}
 
-	scanStmts(fn.Body)
+	scanStmts(fn.Body, false)
 
-	// 2. Catat titik last-use untuk setiap variabel
+	// 2. Catat titik last-use untuk setiap variabel (kecuali yang lolos / escaped)
 	for v, stmts := range accessMap {
+		if escaped[v] {
+			continue
+		}
 		if len(stmts) > 0 {
 			lastStmt := stmts[len(stmts)-1]
 			info.LastUses[lastStmt] = append(info.LastUses[lastStmt], v)

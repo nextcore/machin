@@ -1,6 +1,6 @@
 # The MFL Language Specification
 
-Version 0.140.0-4 (Compile-Time Liveness, Tip-Rewind Memory & Upstream Sync)
+Version 0.140.0-5 (Compile-Time Liveness, Tip-Rewind Memory & Upstream Sync)
 
 MFL (Machine-First Language) is a statically-typed, Go-flavored backend language
 **shaped for machine authoring**: minimal syntax, no type annotations, one

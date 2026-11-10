@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.140.0-5
+
+**Drop Codegen Dereference & Loop Guard Analysis Fixes.**
+- Boxed closure variable dereference in drop codegen: `emitLastUseDrops` now handles closure-captured heap-boxed variables (`char**`) via `g.varRef()`, eliminating compiler type mismatches.
+- Escape & loop guard analysis for liveness check: local variables accessed across iterations inside `while` and `for` loops are protected from premature drop-on-last-use drops, ensuring safe reuse across loop iterations.
+
 ## v0.140.0-4
 
 **Upstream Sync & Robustness Fixes.**

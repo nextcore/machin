@@ -7174,12 +7174,13 @@ func (g *cgen) emitLastUseDrops(s Stmt, depth int) {
 	}
 	for _, v := range vars {
 		k := g.c.VarKind(g.curFn, v)
+		vref := g.varRef(v)
 		if k == KString {
 			indentC(&g.buf, depth)
-			fmt.Fprintf(&g.buf, "if (v_%s) { mfl_release((void*)v_%s, strlen(v_%s) + 1); v_%s = NULL; }\n", v, v, v, v)
+			fmt.Fprintf(&g.buf, "if (%s) { mfl_release((void*)%s, strlen(%s) + 1); %s = NULL; }\n", vref, vref, vref, vref)
 		} else if k == KSlice {
 			indentC(&g.buf, depth)
-			fmt.Fprintf(&g.buf, "if (v_%s.data) { mfl_release(v_%s.data, v_%s.cap * sizeof(*v_%s.data)); v_%s.data = NULL; }\n", v, v, v, v, v)
+			fmt.Fprintf(&g.buf, "if (%s.data) { mfl_release(%s.data, %s.cap * sizeof(*%s.data)); %s.data = NULL; }\n", vref, vref, vref, vref, vref)
 		}
 	}
 }
