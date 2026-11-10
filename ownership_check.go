@@ -78,14 +78,31 @@ func analyzeFuncOwnership(fn *FuncDecl, c *Checker) (*LivenessInfo, []OwnershipD
 	// Var -> daftar urutan statement yang mengaksesnya
 	accessMap := make(map[string][]Stmt)
 
-	for _, stmt := range fn.Body {
-		readVars := collectReadIdents(stmt)
-		for v := range readVars {
-			if isLocalVariable(fn, v) {
-				accessMap[v] = append(accessMap[v], stmt)
+	var scanStmts func(stmts []Stmt)
+	scanStmts = func(stmts []Stmt) {
+		for _, stmt := range stmts {
+			readVars := collectReadIdents(stmt)
+			for v := range readVars {
+				if isLocalVariable(fn, v) {
+					accessMap[v] = append(accessMap[v], stmt)
+				}
+			}
+			// Rekursif ke dalam blok if, while, for-range
+			switch s := stmt.(type) {
+			case *IfStmt:
+				scanStmts(s.Then)
+				scanStmts(s.Else)
+			case *WhileStmt:
+				scanStmts(s.Body)
+			case *RangeStmt:
+				scanStmts(s.Body)
+			case *ArenaStmt:
+				scanStmts(s.Body)
 			}
 		}
 	}
+
+	scanStmts(fn.Body)
 
 	// 2. Catat titik last-use untuk setiap variabel
 	for v, stmts := range accessMap {
@@ -147,26 +164,97 @@ func isLocalVariable(fn *FuncDecl, name string) bool {
 			return true
 		}
 	}
-	// Cari di assignment dalam body fungsi
-	for _, stmt := range fn.Body {
-		switch s := stmt.(type) {
-		case *AssignStmt:
-			if s.Name == name {
-				return true
+	found := false
+	var checkStmts func(stmts []Stmt)
+	checkStmts = func(stmts []Stmt) {
+		for _, stmt := range stmts {
+			if found {
+				return
+			}
+			switch s := stmt.(type) {
+			case *AssignStmt:
+				if s.Name == name {
+					found = true
+					return
+				}
+			case *IfStmt:
+				checkStmts(s.Then)
+				checkStmts(s.Else)
+			case *WhileStmt:
+				checkStmts(s.Body)
+			case *RangeStmt:
+				checkStmts(s.Body)
+			case *ArenaStmt:
+				checkStmts(s.Body)
 			}
 		}
 	}
-	return false
+	checkStmts(fn.Body)
+	return found
 }
 
 // collectReadIdents mengumpulkan semua variabel yang dibaca dalam suatu Statement.
 func collectReadIdents(stmt Stmt) map[string]bool {
 	reads := make(map[string]bool)
-	walkExprs(stmt, func(e Expr) {
-		if id, ok := e.(*Ident); ok {
-			reads[id.Name] = true
+	switch s := stmt.(type) {
+	case *ExprStmt:
+		visitExpr(s.X, func(e Expr) {
+			if id, ok := e.(*Ident); ok {
+				reads[id.Name] = true
+			}
+		})
+	case *AssignStmt:
+		visitExpr(s.Val, func(e Expr) {
+			if id, ok := e.(*Ident); ok {
+				reads[id.Name] = true
+			}
+		})
+	case *ReturnStmt:
+		for _, x := range s.Vals {
+			visitExpr(x, func(e Expr) {
+				if id, ok := e.(*Ident); ok {
+					reads[id.Name] = true
+				}
+			})
 		}
-	})
+	case *SendStmt:
+		visitExpr(s.Ch, func(e Expr) {
+			if id, ok := e.(*Ident); ok {
+				reads[id.Name] = true
+			}
+		})
+		visitExpr(s.Val, func(e Expr) {
+			if id, ok := e.(*Ident); ok {
+				reads[id.Name] = true
+			}
+		})
+	case *IfStmt:
+		visitExpr(s.Cond, func(e Expr) {
+			if id, ok := e.(*Ident); ok {
+				reads[id.Name] = true
+			}
+		})
+	case *WhileStmt:
+		visitExpr(s.Cond, func(e Expr) {
+			if id, ok := e.(*Ident); ok {
+				reads[id.Name] = true
+			}
+		})
+	case *RangeStmt:
+		visitExpr(s.X, func(e Expr) {
+			if id, ok := e.(*Ident); ok {
+				reads[id.Name] = true
+			}
+		})
+	case *GoStmt:
+		if s.Call != nil {
+			visitExpr(s.Call, func(e Expr) {
+				if id, ok := e.(*Ident); ok {
+					reads[id.Name] = true
+				}
+			})
+		}
+	}
 	return reads
 }
 

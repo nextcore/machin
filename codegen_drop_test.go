@@ -34,3 +34,4 @@ func main() { compute() }
 		t.Fatalf("expected mfl_release for v_s in emitted C, got:\n%s", csrc)
 	}
 }
+
