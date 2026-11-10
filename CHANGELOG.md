@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.140.0-4
+
+**Upstream Sync & Robustness Fixes.**
+- Sinkronisasi upstream `javimosch/machin`: penambahan `sqlite_errmsg(db)` dan `sqlite_query` mengembalikan `""` saat error.
+- Dukungan pembacaan `/proc` dan `/sys` pseudo-files di Linux hingga EOF pada `read_file` dan `read_file_bytes`.
+- Pelaporan diagnostik ketidakcocokan tipe (mismatch) yang lebih presisi dengan menyertakan nama fungsi dan posisi `file:line`.
+- Penyelarasan probe static library untuk dependensi kompresi OpenSSL (zlib/zstd/brotli).
+
 ## v0.140.0-3
 
 **Gojo-Inspired Memory Safety, Drop-on-Last-Use & Liveness Analysis.**
