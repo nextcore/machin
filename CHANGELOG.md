@@ -3,26 +3,26 @@
 ## v0.140.0-4
 
 **Upstream Sync & Robustness Fixes.**
-- Sinkronisasi upstream `javimosch/machin`: penambahan `sqlite_errmsg(db)` dan `sqlite_query` mengembalikan `""` saat error.
-- Dukungan pembacaan `/proc` dan `/sys` pseudo-files di Linux hingga EOF pada `read_file` dan `read_file_bytes`.
-- Pelaporan diagnostik ketidakcocokan tipe (mismatch) yang lebih presisi dengan menyertakan nama fungsi dan posisi `file:line`.
-- Penyelarasan probe static library untuk dependensi kompresi OpenSSL (zlib/zstd/brotli).
+- Upstream sync with `javimosch/machin`: added `sqlite_errmsg(db)` and updated `sqlite_query` to return `""` on error instead of indistinguishable `[]`.
+- Linux pseudo-files support: `read_file` and `read_file_bytes` now read `/proc` and `/sys` to EOF regardless of `st_size == 0`.
+- Precise type mismatch diagnostics: error messages now include enclosing function names and exact `file:line` source locations.
+- Static build dependencies: added probing and linking for static OpenSSL compression dependencies (zlib, zstd, brotli).
 
 ## v0.140.0-3
 
 **Gojo-Inspired Memory Safety, Drop-on-Last-Use & Liveness Analysis.**
-- Analisis ownership & liveness statis: pelacakan instruksi last-use variabel lokal (`string` dan `slice`) melintasi percabangan (`if`), perulangan (`while`), dan `range`.
-- Otomatisasi pembebasan memori C codegen: emisi otomatis `mfl_release` tepat saat titik last-use tercapai, memundurkan pointer bump allocator (*tip-rewind* $O(1)$) untuk mencegah memory blowup di loop panjang tanpa manual `arena { }`.
-- Deteksi *Use-After-Move* (`OWN002`) pada kanal `ch <- v` yang terintegrasi langsung dengan `machin check --json`.
-- Zero-copy slice borrow: optimasi `mfl_subslice` untuk peminjaman range penuh tanpa duplikasi alokasi memori.
+- Static ownership and liveness analysis: recursive last-use instruction tracking for local allocations (`string` and `slice`) across `if`, `while`, and `range` blocks.
+- Automated drop codegen: automatic injection of `mfl_release` at last-use points, rewinding the bump allocator tip in $O(1)$ to prevent memory leaks in loops without requiring manual `arena { }` wrapping.
+- Compile-time Use-After-Move detection (`OWN002`) for channel sends (`ch <- v`), integrated into `machin check --json`.
+- Zero-copy slice borrows: optimized `mfl_subslice` for full-range borrows without duplicate allocations.
 
 ## v0.140.0-2
 
-**Goose-Inspired Chunked Bump Arena & Zero-Copy String Optimizations.**
-- Ganti linked-list malloc per-objek dengan 64 KB Chunky Bump Allocator (alokasi fast-path 1 clock CPU, ~3x lebih cepat).
-- Optimasi zero-copy slice pada `substr` dan zero-allocation untuk empty string `mfl_dup`.
-- Penambahan perintah CLI `machin version`, `-v`, dan `--version`.
-- Peningkatan ketahanan memori untuk operasional server 365 hari non-stop.
+**Chunked Bump Arena & Zero-Copy String Optimizations.**
+- Replaced per-object linked-list malloc with 64 KB Chunky Bump Allocator (~3x faster, 1 CPU clock fast-path allocation).
+- Zero-copy slice optimization on `substr` and zero-allocation handling for empty strings in `mfl_dup`.
+- Added CLI version command and flags (`machin version`, `-v`, `--version`).
+- Enhanced memory resilience for continuous server workloads.
 
 ## v0.140.0
 
