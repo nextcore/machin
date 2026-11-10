@@ -179,6 +179,19 @@ func analyzeSource(combined string, srcNames []string) CheckResult {
 				warns = append(warns, d)
 			}
 
+			// ownership phase: Gojo-inspired compile-time ownership and use-after-move checks
+			ownDiags, _ := AnalyzeOwnership(prog, c)
+			for _, od := range ownDiags {
+				diags = append(diags, Diagnostic{
+					Severity: "error",
+					Phase:    "typecheck",
+					Code:     od.Code,
+					Message:  od.Message,
+					Decl:     od.Decl,
+					Line:     declLine[od.Decl],
+				})
+			}
+
 			// arena phase: a value allocated inside an `arena { }` block that escapes to a
 			// location outliving the block (so it dangles after bulk reclamation). Sound +
 			// conservative — a clean result proves the block's reclamation is safe. Advisory.

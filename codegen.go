@@ -337,6 +337,23 @@ static void* mfl_alloc(size_t sz) {
     if (!a->scoped && !a->warned && a->bytes > mfl_arena_warn_bytes) mfl_arena_warn(a);
     return (void*)nc->data;
 }
+
+/* mfl_release / tip-rewind (Gojo-inspired drop-on-last-use):
+   Jika pointer yang dibebaskan adalah alokasi paling terakhir pada chunk aktif,
+   kita bisa langsung memundurkan pointer bump alokator (0-cost recycling). */
+static void mfl_release(void* p, size_t sz) {
+    if (!p || sz == 0) return;
+    if (!mfl_arena_cur) mfl_arena_cur = &mfl_main_arena;
+    mfl_arena* a = mfl_arena_cur;
+    mfl_chunk* c = a->cur;
+    if (!c) return;
+    size_t aligned_sz = (sz + 7) & ~7;
+    char* expected_tip = c->data + c->used;
+    if ((char*)p + aligned_sz == expected_tip) {
+        c->used -= aligned_sz;
+        if (a->bytes >= sz) a->bytes -= sz;
+    }
+}
 /* mfl_calloc is only ever used to box a local captured by a nested closure
    (see function() in codegen.go); that box must outlive the arena of whoever
    declares it, so it's plain calloc, not mfl_alloc (#314). */
