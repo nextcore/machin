@@ -93,6 +93,11 @@ func analyzeFuncOwnership(fn *FuncDecl, c *Checker) (*LivenessInfo, []OwnershipD
 			globalSet[g] = true
 		}
 	}
+	// Return variables juga escaping sehingga nilai yang dimasukkan ke dalamnya tidak di-drop
+	for _, r := range fn.Returns {
+		globalSet[r] = true
+		escaped[r] = true
+	}
 
 	var scanStmts func(stmts []Stmt, inLoop bool)
 	scanStmts = func(stmts []Stmt, inLoop bool) {
@@ -126,6 +131,23 @@ func analyzeFuncOwnership(fn *FuncDecl, c *Checker) (*LivenessInfo, []OwnershipD
 					escaped[rv] = true
 				}
 			}
+			// c) Function / method calls: argumen yang dilewatkan ke fungsi lain berpotensi disimpan
+			// ke variabel global, closure, atau struktur lain (escape)
+			walkExprs(stmt, func(e Expr) {
+				if call, ok := e.(*Call); ok {
+					for _, arg := range call.Args {
+						if id, ok := arg.(*Ident); ok {
+							escaped[id.Name] = true
+						}
+					}
+				} else if cv, ok := e.(*CallValue); ok {
+					for _, arg := range cv.Args {
+						if id, ok := arg.(*Ident); ok {
+							escaped[id.Name] = true
+						}
+					}
+				}
+			})
 
 			// Rekursif ke dalam blok if, while, for-range
 			switch s := stmt.(type) {

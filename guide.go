@@ -28,7 +28,7 @@ var skillDeploy string
 
 // machinVersion is the single version string for the toolchain. Bump it when
 // cutting a release (alongside README badge / SPEC / CHANGELOG).
-const machinVersion = "0.140.0-5"
+const machinVersion = "0.140.0-6"
 
 // ---- the source-of-truth feature catalog ----
 //

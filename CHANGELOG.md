@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.140.0-6
+
+**Escape Analysis Hardening for Named Returns & Function Arguments.**
+- Named Return Escape Protection: Return variables in function signatures are marked as escaping in liveness analysis, preventing early drops of structs or string responses before they are returned to caller.
+- Function Call Argument Escape Tracking: Arguments passed into external function or method calls are tracked as escaping, preventing premature memory drops when parameters are passed to callee routines.
+
 ## v0.140.0-5
 
 **Drop Codegen Dereference & Loop Guard Analysis Fixes.**
