@@ -488,6 +488,11 @@ static mfl_slice mfl_subslice(mfl_slice s, int64_t lo, int64_t hi, int64_t es) {
         mfl_panic(b);
     }
     int64_t n = hi - lo;
+    /* Goose/Gojo zero-copy slice optimization:
+       Jika lo == 0 dan hi == s.len, kembalikan view asli tanpa alokasi baru. */
+    if (lo == 0 && n == s.len) {
+        return s;
+    }
     mfl_slice r = { n ? mfl_alloc(n * es) : NULL, n, n };
     if (n) memcpy(r.data, (char*)s.data + lo * es, n * es);
     return r;
