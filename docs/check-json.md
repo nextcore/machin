@@ -74,7 +74,7 @@ One JSON object on stdout (never streamed/partial — trivially parseable):
 ### `code` enumeration (initial, stable)
 `parse-unexpected-token`, `parse-unterminated-string`, `parse-unbalanced-braces`,
 `type-mismatch`, `undefined-name`, `undefined-field`, `arity-mismatch`,
-`not-callable`, `no-main`, `unsupported-construct`. Concurrency codes (phase `race`):
+`not-callable`, `no-main`, `unsupported-construct`. Ownership codes: `OWN002` (use-after-move via channel). Concurrency codes (phase `race`):
 `RACE001`, `RACE002`, `RACE004` (below). Falsify codes (phase `falsify`, advisory):
 `FALS001`, `FALS002`, `FALS010` (below). New codes are additive; existing codes never change meaning.
 

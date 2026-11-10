@@ -780,13 +780,30 @@ See `examples/complex/http_client_api.mfl` for the full runnable example.
 
 ---
 
-## Memory / arenas
+## Memory management & arenas
 
-Each goroutine allocates from its own per-goroutine arena, which is garbage
-collected automatically — there is no manual `free`. Within a goroutine, a
-scoped `arena { }` block bump-allocates everything created inside it and
-reclaims that memory as soon as the block exits, which avoids GC pressure in
-hot loops:
+Machin uses a per-goroutine chunked bump arena allocator, combined with automatic compile-time liveness tracking (Gojo-inspired drop-on-last-use).
+
+### Automatic Drop-on-Last-Use (v0.140.0-3+)
+The compiler tracks the lifetime of local allocations (strings and slices) and automatically emits `mfl_release` immediately after their last-use statement. If the deallocated value resides at the current allocation tip of the active 64 KB chunk, the bump allocator rewinds its tip in $O(1)$ time (`c->used -= aligned_sz`).
+
+This keeps memory usage flat across long-running loops without requiring manual intervention:
+```go
+func main() {
+    i := 0
+    while i < 1000000 {
+        // s is allocated, printed, and its memory tip is immediately recycled at loop tail
+        s := "temporary-" + str(i)
+        if i == 999999 {
+            println("Done:", s)
+        }
+        i = i + 1
+    }
+}
+```
+
+### Scoped `arena { }` blocks (backward compatible)
+Legacy code or programs with complex, non-tip nested allocations can still use scoped `arena { }` blocks. Within a goroutine, an `arena { }` block isolates allocations into a temporary sub-arena and reclaims all memory created inside it in bulk when the block exits:
 
 ```go
 func render(i) {
@@ -807,9 +824,10 @@ func main() {
 }
 ```
 
-Values that need to outlive the block (like `checksum` above) must be
-assigned to a variable declared outside it. See
-`examples/complex/arena.mfl` for the full runnable example.
+Values that need to outlive the block must either be assigned to an outer variable or explicitly carried out using `escape(v)`. The compiler's escape analysis enforces safety at compile time (`ARENA001` and `ARENA002`).
+
+### Zero-copy slice borrows
+Full-range slice slicing (`s[0:len(s)]`) and sub-byte operations (`bytes_sub`) borrow directly from the parent backing buffer without triggering duplicate memory allocations.
 
 ---
 
