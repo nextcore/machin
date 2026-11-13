@@ -1,6 +1,6 @@
 # The MFL Language Specification
 
-Version 0.142.0-2 (Zero-Copy Slice Views, Windows Target Feature-Complete, JSON Framework, Compile-Time Liveness & Tip-Rewind Memory)
+Version 0.142.0-3 (Runtime Allocator Optimization, -O3 SIMD Vectorization, Zero-Copy Views)
 
 MFL (Machine-First Language) is a statically-typed, Go-flavored backend language
 **shaped for machine authoring**: minimal syntax, no type annotations, one

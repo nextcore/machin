@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.142.0-3
+
+**Runtime Allocator Optimization & SIMD Compiler Flags.**
+- In-place chunk realloc for `mfl_realloc_owned`: growing slices at chunk boundaries reallocates the chunk in-place when starting at chunk base, slashing memory churn.
+- Fast-path inline & branch prediction hint (`__builtin_expect`) for `mfl_alloc`, bypassing call overhead on tight loops.
+- `static inline` zero-overhead raw memory accessors (`peek_*` and `poke_*`).
+- Enabled `-O3 -march=native` default backend optimization flags for auto-vectorization.
+
 ## v0.142.0-2
 
 **Zero-Copy Slice Views & OOM Elimination in Iterative Computations.**
