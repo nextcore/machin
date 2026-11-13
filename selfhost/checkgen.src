@@ -58,9 +58,15 @@ var g_insts = []Inst{}
 var cur_nn = []int{}
 var cur_ns = []int{}
 // the $globals context: node->slot recordings for package-global initializer exprs
-// (codegen queries these with iid == -1).
+// (codegen queries these with iid == -1), plus the call/funclit instance records —
+// without them a Call or K_FUNCLIT inside a global init segfaulted cg_call's
+// g_insts[-1] lookup.
 var g_glob_nn = []int{}
 var g_glob_ns = []int{}
+var g_glob_cn = []int{}
+var g_glob_ci = []int{}
+var g_glob_ln = []int{}
+var g_glob_li = []int{}
 var cur_cnodes = []int{}
 var cur_cinsts = []int{}
 var cur_litnodes = []int{}   // #308: K_FUNCLIT node indices ...
@@ -619,6 +625,7 @@ func scan_expr_captures(idx) {
     if k == K_FIELD { scan_expr_captures(n.a)  return }
     if k == K_RECV { scan_expr_captures(n.a)  return }
     if k == K_SLICE { for _, e := range n.kids { scan_expr_captures(e) }  return }
+    if k == K_MAKESLICE { scan_expr_captures(n.a)  if n.b >= 0 { scan_expr_captures(n.b) }  return }
     if k == K_STRUCT { for _, e := range n.kids { scan_expr_captures(e) }  return }
     if k == K_FUNCLIT { g_lit_bail = 1  return }   // nested closures: still deferred
     // K_INT/K_FLOAT/K_STR/K_BOOL/K_NIL/K_MAKEMAP/K_MAKECHAN: no identifier refs
@@ -741,6 +748,13 @@ func gen_expr_inner(idx) (slot) {
     if k == K_MAKECHAN {
         e := type_slot(n.s)
         slot = new_chan_slot(e)
+        return slot
+    }
+    if k == K_MAKESLICE {
+        ls := gen_expr(n.a)
+        add_pair(ls, c_int)
+        if n.b >= 0 { cs := gen_expr(n.b)  add_pair(cs, c_int) }
+        slot = type_slot(n.s)
         return slot
     }
     if k == K_RECV {
@@ -935,6 +949,29 @@ func gen_builtin(callee, argslots) (handled, slot) {
         slot = c_string
         return handled, slot
     }
+    // sort(xs) -> a NEW slice, ascending (types.go #580). Orderability of the
+    // element is a codegen concern, not a type error.
+    if callee == "sort" {
+        if len(argslots) != 1 { g_check_err = 1  return handled, slot }
+        elem := slice_elem(argslots[0])
+        slot = new_slice_slot(elem)
+        return handled, slot
+    }
+    // sort_by(xs, less) -> a NEW slice ordered by less(a, b) bool. The comparator
+    // must take two elements and return bool; its params unify with the element.
+    if callee == "sort_by" {
+        if len(argslots) != 2 { g_check_err = 1  return handled, slot }
+        elem := slice_elem(argslots[0])
+        r := find(argslots[1])
+        if kind_of(argslots[1]) != 11 || g_fsig[r] < 0 { g_check_err = 1  return handled, slot }
+        sig := g_sigs[g_fsig[r]]
+        if len(sig.params) != 2 { g_check_err = 1  return handled, slot }
+        union(sig.params[0], elem)
+        union(sig.params[1], elem)
+        union(sig.ret, c_bool)
+        slot = new_slice_slot(elem)
+        return handled, slot
+    }
     // copy(v) -> the same type as v (#639). The self-hosted CHECKER knows it,
     // because a program using it must still type-check; the self-hosted CODEGEN
     // does not emit it and says so — see cgbuiltin.src, and the same split that
@@ -1072,10 +1109,10 @@ func bspec(name) (s) {
     if name == "alloc" { s = "i>i"  return s }
     if name == "free" { s = "i>v"  return s }
     if name == "madvise_free" { s = "ii>v"  return s }
-    if name == "poke_f32" { s = "iin>v"  return s }
-    if name == "poke_i32" || name == "poke_u8" || name == "poke_u16" || name == "poke_ptr" { s = "iii>v"  return s }
-    if name == "peek_f32" { s = "ii>f"  return s }
-    if name == "peek_i32" || name == "peek_i8" || name == "peek_u8" { s = "ii>i"  return s }
+    if name == "poke_f32" || name == "poke_f64" { s = "iin>v"  return s }
+    if name == "poke_i8" || name == "poke_i16" || name == "poke_i32" || name == "poke_i64" || name == "poke_u8" || name == "poke_u16" || name == "poke_u32" || name == "poke_u64" || name == "poke_ptr" { s = "iii>v"  return s }
+    if name == "peek_f32" || name == "peek_f64" { s = "ii>f"  return s }
+    if name == "peek_i8" || name == "peek_i16" || name == "peek_i32" || name == "peek_i64" || name == "peek_u8" || name == "peek_u16" || name == "peek_u32" || name == "peek_u64" || name == "peek_ptr" { s = "ii>i"  return s }
     if name == "dot_i8" { s = "iii>i"  return s }
     if name == "dot_q8" { s = "iiiiii>f"  return s }
     if name == "matmul_q8_batch" { s = "iiiiiiiiiii>v"  return s }
@@ -1335,8 +1372,15 @@ func gen_multi_assign(idx) {
         } else {
             s, found := env_lookup(nm)
             if found == 0 {
-                if n.s2 == "=" { g_check_err = 1  return }
-                s = env_declare(nm)
+                // `=` to a package global assigns the global (same fallback as
+                // the single-assign form); `:=` always declares a local.
+                gs, gfound := global_lookup(nm)
+                if gfound == 1 && n.s2 == "=" {
+                    s = gs
+                } else {
+                    if n.s2 == "=" { g_check_err = 1  return }
+                    s = env_declare(nm)
+                }
             }
             nameslots = append(nameslots, s)
         }

@@ -242,6 +242,18 @@ func TestJSONParseSliceAndMap(t *testing.T) {
 	}
 }
 
+// bytes serialize as base64 JSON strings so binary payloads (NULs, non-UTF8)
+// survive a json()/parse() round-trip — the path channel sends and global
+// promotion use for structs containing slices of bytes (#648 follow-up).
+func TestJSONBytesRoundTrip(t *testing.T) {
+	got := runProg(t,
+		`type B struct { buf []bytes }`,
+		`func main() { buf := append([]bytes{}, bytes("hi"))  buf = append(buf, from_hex("ff00fe"))  b := B{buf: buf}  p := parse(json(b), B{}) println(len(p.buf), bytes_str(p.buf[0]), to_hex(p.buf[1])) }`)
+	if got != "2 hi ff00fe\n" {
+		t.Fatalf("got %q", got)
+	}
+}
+
 // parse() must decode \uXXXX JSON escapes (UTF-8 encoding the code point) --
 // #311: the old parser dropped the backslash and leaked the literal "uXXXX"
 // text through, silently corrupting any JSON with an escaped non-ASCII char
@@ -724,6 +736,113 @@ func TestChannelSliceMap(t *testing.T) {
 	}
 }
 
+// #648: a value stored into package-global storage from a goroutine must be
+// copied into the main arena — the child's arena is freed when it exits, so an
+// unpromoted string/slice/map/struct global would dangle. Covers plain assign,
+// multi-assign, field assign, and index assign into globals.
+func TestGlobalArenaPromote(t *testing.T) {
+	out := buildRunProg(t,
+		`var gname = ""`,
+		`var glabel = ""`,
+		`var goflags = []string{}`,
+		`var gnotes = make(map[string]string)`,
+		`type Cfg struct { n int  tag string }`,
+		`var gcfg = Cfg{n: 0, tag: ""}`,
+		`func writer(done) {
+			part := "world"
+			gname = "hello-" + part
+			gname, glabel = "m-" + part, "n-" + part
+			goflags = []string{"a" + part, "b" + part}
+			gnotes["k"] = "v-" + part
+			gcfg = Cfg{n: 7, tag: "t-" + part}
+			gcfg.tag = "u-" + part
+			goflags[0] = "z" + part
+			done <- 1
+		}`,
+		`func main() {
+			done := make(chan int)
+			go writer(done)
+			<-done
+			sleep(30)
+			i := 0
+			for i < 300 {
+				junk := "reclaim-padding-" + str(i) + "-xxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+				if len(junk) < 0 { println(junk) }
+				i = i + 1
+			}
+			println(gname)
+			println(glabel)
+			println(goflags[0] + " " + goflags[1])
+			println(gnotes["k"])
+			println(str(gcfg.n) + " " + gcfg.tag)
+		}`,
+	)
+	want := "m-world\nn-world\nzworld bworld\nv-world\n7 u-world\n"
+	if out != want {
+		t.Fatalf("global arena promote: got %q, want %q", out, want)
+	}
+}
+
+// Store targets rooted at non-identifier expressions exercise globalRootName's
+// peel/default paths: a slice-expression root still resolves to the global
+// (mfl_subslice copies, so the write lands in a throwaway copy — gs stays 5),
+// a call root resolves to nothing and stores unpromoted (#648).
+func TestGlobalPromoteEdgeTargets(t *testing.T) {
+	got := runProg(t,
+		`var gs = []int{}`,
+		`func get() (s) { s = []int{1,2}  return s }`,
+		`func main() { gs = []int{5,6}  gs[0:1][0] = 9  get()[0] = 3  _ = get()  println(gs[0]) }`)
+	if got != "5\n" {
+		t.Fatalf("got %q", got)
+	}
+}
+
+// Multi-assign from a multi-return call into globals inside a goroutine:
+// the tuple path routes each result through promoteGlobal like the parallel
+// and single-value paths do (#648).
+func TestGlobalPromoteMultiReturn(t *testing.T) {
+	out := buildRunProg(t,
+		`var ga = ""`,
+		`var gb = 0`,
+		`func mkpair() { return "p" + "q", 20 + 22 }`,
+		`func writer(done) { ga, gb = mkpair()  done <- 1 }`,
+		`func main() { done := make(chan int)  go writer(done)  <-done  sleep(30)  println(ga)  println(str(gb)) }`)
+	want := "pq\n42\n"
+	if out != want {
+		t.Fatalf("global multi-return promote: got %q, want %q", out, want)
+	}
+}
+
+// A struct with a bytes field stored into a global exercises the bytes arm of
+// chanStrOffsets / mfl_promote_strs (negative field offsets, #648).
+func TestGlobalPromoteBytesField(t *testing.T) {
+	out := buildRunProg(t,
+		`type B struct { tag string  data bytes }`,
+		`var gb = B{tag: "", data: bytes("")}`,
+		`func writer(done) { gb = B{tag: "t" + "1", data: bytes("d" + "x")}  done <- 1 }`,
+		`func main() { done := make(chan int)  go writer(done)  <-done  sleep(30)  println(gb.tag)  println(bytes_str(gb.data)) }`)
+	want := "t1\ndx\n"
+	if out != want {
+		t.Fatalf("global bytes-field promote: got %q, want %q", out, want)
+	}
+}
+
+// A global whose type needs JSON promotion but has no serializer (a slice of
+// channels) is rejected at compile time — the same boundary channels enforce.
+func TestGlobalPromoteRejectsUnserializable(t *testing.T) {
+	prog, err := ParseProgram([]string{
+		normalize(`var chs = make([]chan int, 0)`),
+		normalize(`func main() { c := make(chan int)  chs = append(chs, c)  println(len(chs)) }`),
+	})
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	_, err = RunCaptured(prog)
+	if err == nil || !strings.Contains(err.Error(), "cannot serialize") {
+		t.Fatalf("expected serialize error, got %v", err)
+	}
+}
+
 // A string (or a struct's string fields) built in a short-lived goroutine and
 // passed as a `go` call ARGUMENT (not sent over a channel) must survive that
 // goroutine's arena being reclaimed -- the exact machweb pattern from #310:
@@ -872,6 +991,31 @@ func TestChannelClose(t *testing.T) {
 	}
 }
 
+// #673: a goroutine must never receive its OWN queued send — the old queue
+// delivered it, so `ch <- 1; <-ch` in one goroutine (the keeper-lock idiom)
+// satisfied itself and spun at 100% CPU. A select recv now reports "not ready"
+// for a self-sent head node; after close() the drain still delivers it (close
+// preserves FIFO order and self-delivery no longer matters).
+func TestChannelNoSelfDelivery(t *testing.T) {
+	main := `func main() {
+	ch := make(chan int)
+	ch <- 5
+	select {
+	case v := <-ch:
+		println("self-delivered " + str(v))
+	default:
+		println("not ready")
+	}
+	close(ch)
+	v, ok := <-ch
+	println(str(v) + " " + str(ok))
+}`
+	out, _ := buildRun(t, main)
+	if out != "not ready\n5 true\n" {
+		t.Fatalf("no-self-delivery: got %q, want %q", out, "not ready\n5 true\n")
+	}
+}
+
 // flush() forces buffered stdout out; it compiles to fflush and is a no-op on
 // captured output (which sees everything anyway), so just assert it runs.
 func TestFlush(t *testing.T) {
@@ -939,6 +1083,24 @@ func TestSQLiteQueryError(t *testing.T) {
 	fields := strings.Fields(out)
 	if len(fields) != 3 || fields[0] != "0" || fields[1] != "2" || fields[2] == "0" {
 		t.Fatalf("sqlite error signaling: got %q, want '0 2 <nonzero>'", out)
+	}
+}
+
+// #646: sqlite_exec returns the sqlite3 result code — 0 on success, nonzero on
+// failure (e.g. 19 SQLITE_CONSTRAINT). The rc channel exists; this pins it.
+func TestSQLiteExecRc(t *testing.T) {
+	main := `func main() {
+	db := sqlite_open(":memory:")
+	sqlite_exec(db, "CREATE TABLE t(k TEXT PRIMARY KEY)")
+	a := sqlite_exec(db, "INSERT INTO t VALUES(?)", []string{"x"})
+	b := sqlite_exec(db, "INSERT INTO t VALUES(?)", []string{"x"})
+	println(str(a) + " " + str(b))
+	sqlite_close(db)
+}`
+	out, _ := buildRun(t, main)
+	fields := strings.Fields(out)
+	if len(fields) != 2 || fields[0] != "0" || fields[1] == "0" {
+		t.Fatalf("sqlite_exec rc: got %q, want '0 <nonzero>'", out)
 	}
 }
 
@@ -1267,6 +1429,39 @@ func TestRawMemoryPeekI8U8(t *testing.T) {
 	}
 }
 
+// The full peek/poke width matrix (#675): every integer width round-trips with
+// the named sign extension, f64 keeps full precision, and peek_ptr reads back a
+// pointer-sized value. i16/u16 are the int16 ground-height / fixed-point case
+// that motivated the issue.
+func TestRawMemoryWidthMatrix(t *testing.T) {
+	main := `func main() {
+	p := alloc(64)
+	poke_i8(p, 0, -100)
+	poke_u8(p, 1, 250)
+	poke_i16(p, 2, -12345)
+	poke_u16(p, 4, 65535)
+	poke_i32(p, 8, -70000)
+	poke_u32(p, 12, 4000000000)
+	poke_i64(p, 16, -9000000000)
+	poke_u64(p, 24, 0x7FFFFFFFFFFFFFFF)
+	poke_f32(p, 32, 2.5)
+	poke_f64(p, 40, 3.14159265358979)
+	poke_ptr(p, 48, p)
+	println(str(peek_i8(p, 0)) + " " + str(peek_u8(p, 1)))
+	println(str(peek_i16(p, 2)) + " " + str(peek_u16(p, 4)))
+	println(str(peek_i32(p, 8)) + " " + str(peek_u32(p, 12)))
+	println(str(peek_i64(p, 16)) + " " + str(peek_u64(p, 24)))
+	println(str(peek_f32(p, 32)) + " " + str(peek_f64(p, 40)))
+	println(str(peek_ptr(p, 48) == p))
+	free(p)
+}`
+	out, _ := buildRun(t, main)
+	want := "-100 250\n-12345 65535\n-70000 4000000000\n-9000000000 9223372036854775807\n2.5 3.14159\ntrue\n"
+	if out != want {
+		t.Fatalf("raw memory width matrix: got %q, want %q", out, want)
+	}
+}
+
 // dot_i8: signed-byte dot product over raw buffers. 3*(-4) + 100*100 + (-128)*2
 // = 9732 exercises sign handling on both sides; a second call over the same
 // buffer at an offset checks pointer arithmetic composes.
@@ -1289,8 +1484,10 @@ func TestRawMemoryDotI8(t *testing.T) {
 }
 
 // dot_q8: the grouped, dual-scaled int8 dot. Two groups of gs=2.
-//   group0: x=[2,3] w=[4,5]  dot=23,  xs=0.5 ws=2.0 -> 23*1.0   = 23
-//   group1: x=[1,-2] w=[3,1] dot=1,   xs=0.25 ws=4.0 -> 1*1.0   = 1
+//
+//	group0: x=[2,3] w=[4,5]  dot=23,  xs=0.5 ws=2.0 -> 23*1.0   = 23
+//	group1: x=[1,-2] w=[3,1] dot=1,   xs=0.25 ws=4.0 -> 1*1.0   = 1
+//
 // total 24.0. Verifies grouping, per-group dual scaling, and signedness.
 func TestRawMemoryDotQ8(t *testing.T) {
 	main := `func main() {
@@ -1556,6 +1753,40 @@ func TestNestedCStruct(t *testing.T) {
 	}
 }
 
+// #650: a user struct holding an extern cstruct must emit the cstruct's mfl_
+// typedef first — p.Types lists user types before synthesized cstructs, so
+// declaration order alone produced `mfl_Theme{ mfl_Color f_bg }` before
+// `mfl_Color` existed (check passed, cc failed). Same hazard one level down:
+// a cstruct nesting a later-declared cstruct needs the inner converters
+// defined first. Assert the emitted order directly.
+func TestCStructTypedefOrder(t *testing.T) {
+	src := []string{
+		`extern "g" { header "g.h" cstruct Outer { i Inner } cstruct Inner { v i32 } cstruct Color { r u8 g u8 b u8 a u8 } fn Use(Outer) }`,
+		`type Wrap struct { o Outer  c Color }`,
+		`type Theme struct { bg Color }`,
+		`func main() { w := Wrap{}  t := Theme{}  println(str(w.o.i.v) + " " + str(t.bg.r)) }`,
+	}
+	prog, err := ParseProgram(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, err := CompileToC(prog, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := func(a, b string) {
+		t.Helper()
+		ia, ib := strings.Index(c, a), strings.Index(c, b)
+		if ia < 0 || ib < 0 || ia > ib {
+			t.Fatalf("typedef order: %q (at %d) must precede %q (at %d)", a, ia, b, ib)
+		}
+	}
+	before("} mfl_Inner;", "mfl_Inner f_i;")     // nested cstruct typedef
+	before("} mfl_Color;", "mfl_Color f_bg;")    // user struct -> cstruct field
+	before("} mfl_Outer;", "mfl_Outer f_o;")     // user struct -> cstruct field
+	before("mfl_from_Inner(", "mfl_from_Outer(") // converter order
+}
+
 // Issue #552: a narrow cstruct field (u8/u16/i32/...) silently truncates at the
 // FFI boundary while the MFL-side value keeps the full int64 — reading the
 // field back does not reveal it. Under --safe, mfl_to_<Struct> must instead
@@ -1591,6 +1822,35 @@ func TestNarrowCStructFieldSafe(t *testing.T) {
 	}
 	if !strings.Contains(safeC, `mfl_narrow(m.f_r, 0, 255, "u8 field 'r'")`) {
 		t.Fatal("--safe build must range-check a narrow cstruct field and panic on overflow")
+	}
+}
+
+// Every narrow FFI integer width gets its own range check under --safe —
+// i8/i16/i32 sign-extend bounds, u8/u16/u32 zero-extend (#552).
+func TestNarrowCStructFieldSafeAllWidths(t *testing.T) {
+	src := []string{
+		`extern "g" { header "g.h" cstruct N { a i8 b i16 c i32 d u8 e u16 f u32 } fn Use(N) }`,
+		`func main() { n := N{1, 2, 3, 4, 5, 6}  Use(n) }`,
+	}
+	prog, err := ParseProgram(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	safeC, err := CompileToC(prog, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		`mfl_narrow(m.f_a, -128, 127`,
+		`mfl_narrow(m.f_b, -32768, 32767`,
+		`mfl_narrow(m.f_c, -2147483648, 2147483647`,
+		`mfl_narrow(m.f_d, 0, 255`,
+		`mfl_narrow(m.f_e, 0, 65535`,
+		`mfl_narrow(m.f_f, 0, 4294967295`,
+	} {
+		if !strings.Contains(safeC, want) {
+			t.Fatalf("--safe build missing range check %q", want)
+		}
 	}
 }
 

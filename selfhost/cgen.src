@@ -268,6 +268,7 @@ func cg_expr(iid, idx) (out) {
         out = "mfl_make_chan(sizeof(" + ect + "), 0, 0, " + str(len(offs)) + ", " + join(casted, ", ") + ")"
         return out
     }
+    if k == K_MAKESLICE { out = cg_makeslice(iid, idx)  return out }
     if k == K_RECV {
         out = "({ " + node_ctype(iid, idx) + " _r; mfl_chan_recv(" + cg_expr(iid, n.a) + ", &_r); _r; })"
         return out
@@ -371,32 +372,57 @@ func seq_operands(iid, idxs) (names, decls, wrapped) {
 
 // callee_cname: the C name of the callee instance for the call node `idx` in iid.
 func callee_cname(iid, idx) (cn) {
+    cn = "/*?*/"
+    if iid < 0 {
+        // $globals context: call records live in g_glob_cn/g_glob_ci
+        j := 0
+        for j < len(g_glob_cn) {
+            if g_glob_cn[j] == idx { cn = g_insts[g_glob_ci[j]].cname  return cn }
+            j = j + 1
+        }
+        return cn
+    }
     ins := g_insts[iid]
     j := 0
     for j < len(ins.cnodes) {
         if ins.cnodes[j] == idx { cn = g_insts[ins.cinsts[j]].cname  return cn }
         j = j + 1
     }
-    cn = "/*?*/"
 }
 
 // funclit_cname: the C name of the lifted function for the K_FUNCLIT node `idx` in
 // iid (#308) — mirrors callee_cname exactly, over litnodes/litinsts instead of
 // cnodes/cinsts.
 func funclit_cname(iid, idx) (cn) {
+    cn = "/*?*/"
+    if iid < 0 {
+        j := 0
+        for j < len(g_glob_ln) {
+            if g_glob_ln[j] == idx { cn = g_insts[g_glob_li[j]].cname  return cn }
+            j = j + 1
+        }
+        return cn
+    }
     ins := g_insts[iid]
     j := 0
     for j < len(ins.litnodes) {
         if ins.litnodes[j] == idx { cn = g_insts[ins.litinsts[j]].cname  return cn }
         j = j + 1
     }
-    cn = "/*?*/"
 }
 
 // funclit_inst: the lambda instance id for the K_FUNCLIT node `idx` in iid (#308 Phase 2)
 // — mirrors funclit_cname, returning the instance id (for its capture count/names).
 func funclit_inst(iid, idx) (lid) {
     lid = -1
+    if iid < 0 {
+        j := 0
+        for j < len(g_glob_ln) {
+            if g_glob_ln[j] == idx { lid = g_glob_li[j]  return lid }
+            j = j + 1
+        }
+        return lid
+    }
     ins := g_insts[iid]
     j := 0
     for j < len(ins.litnodes) {
@@ -504,7 +530,15 @@ func cg_stmt(iid, idx, depth) {
         // observes the backing array
         owned := al_owned_append(iid, idx)
         if owned != "" { cemit(var_ref(iid, n.s) + " = " + owned + ";\n")  return }
-        cemit(var_ref(iid, n.s) + " = " + cg_expr(iid, n.a) + ";\n")
+        ref := var_ref(iid, n.s)
+        val := cg_expr(iid, n.a)
+        if ref == "mfl_g_" + n.s {
+            // storing into package-global storage: keep arena-backed payload
+            // alive past the assigning goroutine/arena block (#648)
+            gslot, gfound := global_lookup(n.s)
+            if gfound == 1 { val = cg_promote(type_string_slot(gslot), val) }
+        }
+        cemit(ref + " = " + val + ";\n")
         return
     }
     if k == K_RETURN {

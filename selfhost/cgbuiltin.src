@@ -115,14 +115,27 @@ func builtin_cfn(name) (s) {
     if name == "free" { s = "mfl_raw_free"  return s }
     if name == "madvise_free" { s = "mfl_madvise_free"  return s }
     if name == "poke_f32" { s = "mfl_poke_f32"  return s }
+    if name == "poke_f64" { s = "mfl_poke_f64"  return s }
+    if name == "poke_i8" { s = "mfl_poke_i8"  return s }
+    if name == "poke_i16" { s = "mfl_poke_i16"  return s }
     if name == "poke_i32" { s = "mfl_poke_i32"  return s }
+    if name == "poke_i64" { s = "mfl_poke_i64"  return s }
     if name == "poke_u8" { s = "mfl_poke_u8"  return s }
     if name == "poke_u16" { s = "mfl_poke_u16"  return s }
+    if name == "poke_u32" { s = "mfl_poke_u32"  return s }
+    if name == "poke_u64" { s = "mfl_poke_u64"  return s }
     if name == "poke_ptr" { s = "mfl_poke_ptr"  return s }
     if name == "peek_f32" { s = "mfl_peek_f32"  return s }
-    if name == "peek_i32" { s = "mfl_peek_i32"  return s }
+    if name == "peek_f64" { s = "mfl_peek_f64"  return s }
     if name == "peek_i8" { s = "mfl_peek_i8"  return s }
+    if name == "peek_i16" { s = "mfl_peek_i16"  return s }
+    if name == "peek_i32" { s = "mfl_peek_i32"  return s }
+    if name == "peek_i64" { s = "mfl_peek_i64"  return s }
     if name == "peek_u8" { s = "mfl_peek_u8"  return s }
+    if name == "peek_u16" { s = "mfl_peek_u16"  return s }
+    if name == "peek_u32" { s = "mfl_peek_u32"  return s }
+    if name == "peek_u64" { s = "mfl_peek_u64"  return s }
+    if name == "peek_ptr" { s = "mfl_peek_ptr"  return s }
     if name == "dot_i8" { s = "mfl_dot_i8"  return s }
     if name == "dot_q8" { s = "mfl_dot_q8"  return s }
     if name == "matmul_q8_batch" { s = "mfl_matmul_q8_batch"  return s }
@@ -238,6 +251,22 @@ func cg_builtin(iid, call_idx, callee, names) (out) {
     }
     if callee == "noise2" { out = "mfl_noise2((double)(" + names[0] + "), (double)(" + names[1] + "))"  return out }
     if callee == "noise3" { out = "mfl_noise3((double)(" + names[0] + "), (double)(" + names[1] + "), (double)(" + names[2] + "))"  return out }
+    if callee == "sort" {
+        ect := elem_ctype(iid, argn[0])
+        lt := sort_lt(ect)
+        if lt == "" { g_cg_unsup = 1  out = "0"  return out }
+        out = "mfl_sort_copy(" + names[0] + ", sizeof(" + ect + "), " + lt + ", NULL)"
+        return out
+    }
+    if callee == "sort_by" {
+        ect := elem_ctype(iid, argn[0])
+        cmp := sort_comparator(ect)
+        id := g_scbid
+        g_scbid = g_scbid + 1
+        ids := str(id)
+        out = "({ mfl_closure _sc" + ids + " = " + names[1] + "; mfl_sort_copy(" + names[0] + ", sizeof(" + ect + "), " + cmp + ", &_sc" + ids + "); })"
+        return out
+    }
     if callee == "json" || callee == "parse" { g_cg_unsup = 1  out = "0"  return out }
     // copy (#639) emits a per-type deep copier, generated on demand and placed
     // ahead of the function bodies — the same shape as the JSON serializers,
@@ -287,8 +316,15 @@ func cg_print(iid, call_idx, depth) {
 
 func assign_line(iid, name, val, depth) {
     if name == "_" { return }
+    ref := var_ref(iid, name)
+    if ref == "mfl_g_" + name {
+        // storing into package-global storage: keep arena-backed payload
+        // alive past the assigning goroutine/arena block (#648)
+        gslot, gfound := global_lookup(name)
+        if gfound == 1 { val = cg_promote(type_string_slot(gslot), val) }
+    }
     indent(depth + 1)
-    cemit(var_ref(iid, name) + " = " + val + ";\n")
+    cemit(ref + " = " + val + ";\n")
 }
 
 // mrb_info: multi-return builtin -> (C fn, result struct type, comma-joined fields).
@@ -376,7 +412,13 @@ func cg_multi_assign(iid, idx, depth) {
             cemit("}\n")
             return
         }
-        cemit(var_ref(iid, n.names[0]) + " = " + cg_expr(iid, rhs0) + ";\n")
+        val := cg_expr(iid, rhs0)
+        ref := var_ref(iid, n.names[0])
+        if ref == "mfl_g_" + n.names[0] {
+            gslot, gfound := global_lookup(n.names[0])
+            if gfound == 1 { val = cg_promote(type_string_slot(gslot), val) }
+        }
+        cemit(ref + " = " + val + ";\n")
         return
     }
     // parallel assignment: hoist all RHS into temps, then assign

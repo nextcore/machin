@@ -1,6 +1,6 @@
 # The MFL Language Specification
 
-Version 0.140.0-6 (Compile-Time Liveness, Tip-Rewind Memory & Upstream Sync)
+Version 0.142.0-1 (Windows Target Feature-Complete, JSON Framework, Compile-Time Liveness & Tip-Rewind Memory)
 
 MFL (Machine-First Language) is a statically-typed, Go-flavored backend language
 **shaped for machine authoring**: minimal syntax, no type annotations, one
@@ -371,7 +371,7 @@ startup (before `main`; at `_initialize` for a wasm reactor).
 | `sha256` | `(string) -> string` | SHA-256 of text, lowercase hex |
 | `hmac_sha256` | `(string, string) -> string` | HMAC-SHA256(key, message), lowercase hex |
 | `sqlite_open` | `(string) -> int` | open/create a SQLite db file → handle (0 on fail); `:memory:` for in-memory |
-| `sqlite_exec` | `(int, string[, []string]) -> int` | run SQL with no result; an optional `[]string` binds the `?` placeholders (injection-safe); 0 on success |
+| `sqlite_exec` | `(int, string[, []string]) -> int` | run SQL with no result; an optional `[]string` binds the `?` placeholders (injection-safe); returns the sqlite3 result code — `0` on success, nonzero on failure (e.g. `5` BUSY, `19` CONSTRAINT); handles open with a 5s `busy_timeout` so lock races wait rather than silently drop the write |
 | `sqlite_query` | `(int, string[, []string]) -> string` | run a SELECT → JSON array of row objects; an optional `[]string` binds the `?` placeholders; `""` on failure (`"[]"` is a valid empty result), `sqlite_errmsg` says why; composes with `json_get` |
 | `sqlite_errmsg` | `(int) -> string` | the db handle's most recent error message (`""` for a bad handle) |
 | `sqlite_close` | `(int) -> int` | close the database |
@@ -507,11 +507,16 @@ id(42); id("hi"); id(3.14)   // → three native functions
     a slice or map go through a JSON round-trip.) Fixed in v0.104.0 for `go`
     arguments — see #310; the argument, not just a later channel send of it, is
     now safe.
+  - **Package-global stores are promoted too:** assigning a `string`, slice,
+    map, struct, or `bytes` value to a `var` global — directly, through
+    multi-assign, or as an element/field of a global container — copies its
+    arena-backed payload into the main arena first, so the global stays valid
+    after the assigning goroutine (or `arena { }` block) ends. Scalars and
+    channels need no copy.
   - *Caveat:* a value allocated in one goroutine and shared with another by other
-    means (stored in a map outliving the sender, or captured by a closure that is
-    itself stored somewhere long-lived rather than passed directly to `go`) may
-    be reclaimed while still referenced. Keep such values in the receiver's
-    scope.
+    means (stored in a map or closure environment outliving the sender, rather
+    than a global, channel, or `go` argument) may be reclaimed while still
+    referenced. Keep such values in the receiver's scope.
 - A **scoped arena** block, `arena { ... }`, installs a fresh arena for the
   duration of the block and frees everything allocated inside it when the block
   ends. This bounds the memory of a *single* long-lived goroutine that allocates
@@ -606,14 +611,21 @@ id(42); id("hi"); id(3.14)   // → three native functions
   (`https_*`/`wss_*`) and the OpenSSL crypto builtins. Portability is handled by
   `#ifdef _WIN32` guards in the emitted runtime (so the same C still builds native
   and wasm). TLS/crypto link a mingw OpenSSL the caller supplies via
-  `MACHIN_WIN_OPENSSL=/path` (a dir with `include/` and `lib/`); the CA root
+  `MACHIN_WIN_OPENSSL=/path` (a dir with `include/` and `lib/` — e.g. msys2's
+  ucrt64 `mingw-w64-ucrt-x86_64-openssl`; zig's windows-gnu target is UCRT, so
+  msvcrt mingw64 builds fail to link); the CA root
   bundle is compiled in so certificates verify with no external files. Terminal
   raw mode works via the console API — `raw_mode` clears
   `ENABLE_LINE_INPUT|ENABLE_ECHO_INPUT` with `SetConsoleMode`, `read_key` uses
   `_kbhit`/`_getch` and peeks a redirected stdin so it never blocks. Off a tty the
   two targets agree exactly: `raw_mode` returns `-1` and `read_key` returns at
-  once. XEdDSA (libsodium) and regex remain unsupported and are rejected at build
-  time.
+  once. XEdDSA (`xeddsa_sign`/`xeddsa_verify`) is supported: the runtime declares
+  the libsodium symbols itself, so it links a mingw libsodium's `libsodium.a`
+  supplied via `MACHIN_WIN_SODIUM=/path` (e.g. msys2's ucrt64
+  `mingw-w64-ucrt-x86_64-libsodium`) plus the same OpenSSL (it hashes with EVP
+  SHA-512). POSIX regex is supported by compiling the vendored TRE
+  (`vendor/tre`, BSD-2) — mingw-w64 ships no `<regex.h>`; byte-oriented ERE
+  matching the C-locale semantics the native build's `regexec` gives.
 
 ---
 
@@ -695,8 +707,10 @@ extern "m" { header "math.h" link "m" fn sqrt(float) float fn pow(float, float) 
 
 **Raw memory** (pointers are `int`s, like `ptr`) lets MFL build C buffers and
 structs to hand to a foreign function: `alloc(n) -> int` (n **zeroed** bytes),
-`free(p)`, `poke_f32`/`poke_i32`/`poke_u8`/`poke_u16`/`poke_ptr(p, byteOffset, v)`,
-`peek_f32`/`peek_i32(p, byteOffset)`, and `ptr_str(p) -> string` (read a
+`free(p)`, `poke_f32`/`poke_f64`/`poke_i8`/`poke_i16`/`poke_i32`/`poke_i64`/
+`poke_u8`/`poke_u16`/`poke_u32`/`poke_u64`/`poke_ptr(p, byteOffset, v)`,
+`peek_f32`/`peek_f64`/`peek_i8`/`peek_i16`/`peek_i32`/`peek_i64`/
+`peek_u8`/`peek_u16`/`peek_u32`/`peek_u64`/`peek_ptr(p, byteOffset)`, and `ptr_str(p) -> string` (read a
 NUL-terminated C string at `p`). The pattern for a GPU mesh: `poke` the
 vertex/colour arrays and a `Mesh` struct into `alloc`'d memory, `UploadMesh(p, ...)`
 (a `ptr` param — `void*` converts to `Mesh*`, and the call writes the VAO/VBO ids

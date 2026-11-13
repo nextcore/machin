@@ -1,5 +1,106 @@
 # Changelog
 
+## v0.142.0-1
+
+**Upstream Sync (v0.142.0) with Memory Safety & Tip-Rewind Engine.**
+- Synced upstream v0.141.0 and v0.142.0 features, including Windows feature-complete target (`#517`), vendored TRE POSIX regex, XEdDSA via MinGW libsodium, `framework/json.src`, dependency-ordered struct typedefs, and `machin check --all`.
+- Retained Nextcore additions: static liveness analysis, drop-on-last-use `mfl_release` tip-rewind memory recycling, escape analysis for named returns/function args, and compile-time use-after-move detection.
+
+## v0.142.0
+
+**The windows target is feature-complete — issue #517 closed.** All three
+remaining gaps landed: POSIX regex (vendored TRE, below), XEdDSA signatures,
+and with them every subsystem the preflight used to reject. Cross-compiling
+with `zig cc -target x86_64-windows-gnu` now covers core, sockets, TLS,
+crypto/XEdDSA, SQLite, zlib, terminal, concurrency *and* regex; each piece is
+verified by a PE that actually runs on `windows-latest` in CI.
+
+- **POSIX regex on windows via vendored TRE.** mingw-w64 ships no usable
+  `<regex.h>`, so `BuildWindows` now extracts a vendored TRE source tarball
+  and compiles it alongside the generated C whenever the program uses
+  `regex_match`/`regex_find`/`regex_groups`/`regex_replace`. Byte-oriented
+  ERE matching with C-locale semantics matching native `regexec`; extraction
+  rejects malformed archives and path traversal. Verified end-to-end on real
+  Windows 10 hardware and under wine (#692).
+- **XEdDSA on windows.** `xeddsa_sign`/`xeddsa_verify` link against
+  user-supplied mingw static archives: set `MACHIN_WIN_OPENSSL` (UCRT
+  OpenSSL, EVP SHA-512) and `MACHIN_WIN_SODIUM` (UCRT libsodium) — the deps
+  must come from msys2's `ucrt64` packages because zig's windows-gnu target
+  is UCRT, not msvcrt. `-lssl` is only pulled in for TLS; `-lcrypto` covers
+  XEdDSA hashing (#691, supersedes #577).
+- **Package-global initializers that reference globals no longer crash the
+  compiler.** `var g = N` or `var xs = make([]T, n)` at package scope
+  nil-derefed `isBoxed` in the Go compiler and indexed `g_insts[-1]` in the
+  self-hosted one, because the synthetic `$globals` context had no instance
+  records. Both compilers now record global-init call/funclit instances; the
+  selfhost emits byte-identical C for calls and builtins in global inits
+  (verify-cgen h22) (#690).
+
+## v0.141.0
+
+**`machin check --all` — typecheck declarations before their callers exist.**
+`check` only instantiated functions reachable from `main`/`export func`, so a
+broken library function nothing called yet passed clean and the error surfaced
+only after wiring up a caller. `--all` makes every declaration with no existing
+instance a typecheck root, and lifts the no-main rule for the mode so a library
+file checks before its callers exist. Making it work on real code required two
+checker completions in deferred resolution: a field access on an unbound
+parameter now infers the unique struct declaring that field (ambiguous still
+errors — no guessing), and an unbound index base commits to slice (or map for a
+non-int key). Both fire only where the checker previously hard-errored, and as
+a bonus fix `export func` with struct/slice parameters, which failed the same
+way. Deferred index/range errors now name their function. Verified clean on the
+full nanite demo (#645).
+
+- **`--race-safe` understands machweb.** `serve`, `serve_on`,
+  `serve_on_quiet`, `serve_tls` and `serve_router` handlers are now modeled as
+  the per-request goroutines they are — a handler writing a package global
+  fails the gate instead of dying later as an arena use-after-free, with
+  false-positive guards for same-named user functions and unserved routes
+  (#647).
+- **Arena-backed values stored into package globals are promoted.** A string,
+  slice, map or struct written to a global from a goroutine used to dangle once
+  the writer's arena was reclaimed; global stores now copy the payload into the
+  main arena (`mfl_promote_strs`, JSON round-trip for containers). This also
+  taught the JSON serializer/parser the `bytes` type (base64 round-trip) and
+  emit serializer prototypes before bodies so recursive types order correctly —
+  two latent bugs the Redis framework's `[]bytes` field exposed (#648).
+- **Channels can't deliver a send to its own sender.** Machin channels are
+  unbounded queues, but a node could be dequeued by the goroutine that queued
+  it — `ch <- 1; <-ch` in one goroutine completed both ops, so the keeper-lock
+  idiom spun at 100% CPU. Receives now treat own-sent head nodes as
+  nothing-receivable and park; the deadlock watchdog catches the genuine
+  self-deadlock, matching Go's detectable-deadlock behavior (#673).
+- **The full peek/poke width matrix.** `poke_*`/`peek_*` now cover
+  i8/i16/i32/i64, u8/u16/u32/u64, f32/f64 and ptr — signed reads sign-extend,
+  unsigned zero-extend (`peek_u32` matters for RGBA/length fields where
+  `peek_i32` flips ≥2³¹) (#675).
+- **SQLite errors are actually reported.** `sqlite_exec` returns the sqlite3
+  result code (nonzero on failure — a lost write is detectable) and databases
+  open with a 5s `busy_timeout` so lock races wait instead of vanishing;
+  `sqlite_query` returns `""` on failure (distinct from a valid `"[]"`) with
+  `sqlite_errmsg` saying why (#646, #672).
+- **`read_file`/`read_file_bytes` read procfs and sysfs.** Those files report
+  size 0, so the old `ftell`-sized read returned nothing; both now read to EOF
+  with `ftell` as a capacity hint only (#668).
+- **Struct/cstruct typedefs emit in dependency order**, so forward references
+  between cstructs and user structs compile instead of failing on an
+  undeclared type (#650).
+- **Selfhost compiler parity:** `make([]T, n[, cap])` slice allocation, the
+  `<-` send/less-than disambiguation, float exponent literals, and `sort` —
+  the self-hosted compiler now builds the entire nanite demo byte-identically
+  to the Go compiler (#678).
+- machweb `serve_on` (bind a second port) and `serve_on_quiet` (caller
+  announces its own bind), with `X-Forwarded-For` trusted only from the
+  configured proxy (#671, #674); typecheck errors name the function and source
+  position on mismatches (#676); static OpenSSL builds probe and link `.a`
+  archives (#677).
+- **`framework/json.src` — correct JSON string encode/decode.** `json_get`
+  returns the raw token, so a string value arrives quoted *and* escaped; the
+  obvious `substr` strip is wrong for every escape. `json_unquote`/`json_quote`/
+  `json_str` round-trip any string — quotes, backslashes, control bytes, emoji —
+  for building documents by concatenation and reading string fields (#649).
+
 ## v0.140.0-6
 
 **Escape Analysis Hardening for Named Returns & Function Arguments.**

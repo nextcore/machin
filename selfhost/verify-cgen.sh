@@ -290,6 +290,152 @@ func main() {
 EOF
 run "$T/h14.src"
 
+# h21 — #648: stores into package globals promote arena-backed payload into the
+# main arena (string offsets, JSON round-trip for slice/map, struct fields,
+# index/field assign roots).
+cat > "$T/h21.src" <<'EOF'
+type Cfg struct { n int  tag string }
+var gname = ""
+var glabel = ""
+var goflags = []string{}
+var gnotes = make(map[string]string)
+var gcfg = Cfg{n: 0, tag: ""}
+func writer(done) {
+    part := "world"
+    gname = "hello-" + part
+    gname, glabel = "m-" + part, "n-" + part
+    goflags = []string{"a" + part, "b" + part}
+    gnotes["k"] = "v-" + part
+    gcfg = Cfg{n: 7, tag: "t-" + part}
+    gcfg.tag = "u-" + part
+    goflags[0] = "z" + part
+    done <- 1
+}
+func main() {
+    done := make(chan int)
+    go writer(done)
+    <-done
+    sleep(30)
+    println(gname)
+    println(glabel)
+    println(goflags[0] + " " + goflags[1])
+    println(gnotes["k"])
+    println(str(gcfg.n) + " " + gcfg.tag)
+}
+EOF
+run "$T/h21.src"
+
+# h15 — make([]T, n[, cap]) slice allocation (#678: was a selfhost parse gap).
+cat > "$T/h15.src" <<'EOF'
+func main() {
+    a := make([]int, 4)
+    a[0] = 7
+    a[3] = 9
+    println(len(a), a[0], a[3])
+    b := make([]float, 3, 8)
+    b[1] = 2.5
+    println(len(b), b[1])
+    s := make([]string, 2)
+    s[0] = "hi"
+    println(s[0], len(s))
+}
+EOF
+run "$T/h15.src"
+
+# h16 — `<-` lexer ambiguity (issue #208): `a < -2` tightens to `a<-2` in the
+# canonical .mfl and must still parse as less-than + unary minus, while a real
+# send `ch <- v` keeps its meaning.
+cat > "$T/h16.src" <<'EOF'
+func main() {
+    a := 5
+    b := a < -2
+    c := a<-2
+    println(b, c)
+}
+EOF
+run "$T/h16.src"
+
+# h17 — float exponent literals (1e-30, 2.5e3, 1E+2).
+cat > "$T/h17.src" <<'EOF'
+func main() {
+    a := 1e-30
+    b := 2.5e3
+    c := 1E+2
+    d := 1e3
+    println(a, b, c, d)
+}
+EOF
+run "$T/h17.src"
+
+# h18 — sort(xs): copy-sort builtin (#580). sort_by needs a closure arg, which
+# still hits the pre-existing $lambda C-name divergence — covered by hand check.
+cat > "$T/h18.src" <<'EOF'
+func main() {
+    xs := []int{}
+    xs = append(xs, 3)
+    xs = append(xs, 1)
+    xs = append(xs, 2)
+    ys := sort(xs)
+    println(ys[0], ys[1], ys[2], len(xs))
+}
+EOF
+run "$T/h18.src"
+# h19 — full peek/poke width matrix (#675): every signed/unsigned width plus
+# f64 and ptr must emit the same mfl_* call in both compilers.
+cat > "$T/h19.src" <<'EOF'
+func main() {
+    p := alloc(64)
+    poke_i8(p, 0, -100)
+    poke_u16(p, 4, 65535)
+    poke_i32(p, 8, -70000)
+    poke_u32(p, 12, 4000000000)
+    poke_i64(p, 16, -9000000000)
+    poke_u64(p, 24, 0x7FFFFFFFFFFFFFFF)
+    poke_f32(p, 32, 2.5)
+    poke_f64(p, 40, 3.14159)
+    poke_ptr(p, 48, p)
+    println(peek_i8(p, 0), peek_u16(p, 4), peek_i32(p, 8), peek_u32(p, 12))
+    println(peek_i64(p, 16), peek_u64(p, 24), peek_f32(p, 32), peek_f64(p, 40))
+    println(peek_ptr(p, 48) == p)
+    free(p)
+}
+EOF
+run "$T/h19.src"
+# h20 — #650: struct typedefs emit in dependency order (user->cstruct fields,
+# forward cstruct->cstruct nesting, converter order).
+cat > "$T/h20.src" <<'EOF'
+extern "g" {
+    header "g.h"
+    cstruct Outer { i Inner }
+    cstruct Inner { v i32 }
+    cstruct Color { r u8 g u8 b u8 a u8 }
+    fn Use(Outer, Color)
+}
+type Wrap struct { o Outer  c Color }
+type Theme struct { bg Color }
+func main() {
+    w := Wrap{}
+    t := Theme{}
+    Use(w.o, t.bg)
+}
+EOF
+run "$T/h20.src"
+
+# h22 — global initializers may reference earlier globals AND call functions /
+# builtins (idents inside make() sizes, arithmetic, Call nodes). The "$globals"
+# synthetic context has no FuncDecl instance; Go's isBoxed nil-derefed on it,
+# and the selfhost dropped cur_cnodes/cur_cinsts/cur_lit* for iid == -1 lookups.
+cat > "$T/h22.src" <<'EOF'
+var n = 3
+var m = n + 1
+var xs = make([]int, n, m * 2)
+func dbl(x) { return x * 2 }
+var d = dbl(n)
+var s = str(n) + "!"
+func main() { println(m + len(xs) + d + len(s)) }
+EOF
+run "$T/h22.src"
+
 # SELF-APPLICATION: the MFL codegen emits byte-identical C for the compiler's OWN
 # source (checker + full codegen) — the fixpoint-adjacent milestone.
 $N "$MACHIN" encode selfhost/lex.src selfhost/parse.src selfhost/check.src \

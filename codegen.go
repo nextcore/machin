@@ -34,37 +34,7 @@ func CompileToCTarget(p *Program, safe bool, target string) (string, []string, e
 	if err != nil {
 		return "", nil, err
 	}
-	if target == targetWindows {
-		if err := windowsUnsupported(g); err != nil {
-			return "", nil, err
-		}
-	}
 	return src, c.ExportNames(), nil
-}
-
-// windowsUnsupported reports the first subsystem a program uses that the windows
-// target does not yet cover. Phase 0 of #517 got the POSIX-independent core
-// compiling under mingw-w64 (stdio, strings/maps/slices, arena, goroutines +
-// channels via winpthreads, math, file I/O); Phase N added TCP sockets
-// (dial/listen/accept/read/write) via winsock2; Phase TLS added HTTPS/TLS + the
-// OpenSSL crypto builtins, which link a user-supplied mingw OpenSSL (see
-// BuildWindows / MACHIN_WIN_OPENSSL). Terminal raw mode now maps onto the
-// console API. Still not wired: XEdDSA (libsodium) and POSIX regex. Failing
-// here — rather than emitting C that dies deep in the linker — keeps the error
-// actionable.
-func windowsUnsupported(g *cgen) error {
-	for _, u := range []struct {
-		used bool
-		what string
-	}{
-		{g.usesXEdDSA, "XEdDSA (xeddsa_* — needs libsodium for Windows, not yet wired)"},
-		{g.usesRegex, "regex (regex_*)"},
-	} {
-		if u.used {
-			return fmt.Errorf("the windows target does not yet support %s — see issue #517 (supported: the stdio/compute core, TCP sockets, SQLite, and HTTPS/TLS+crypto via a user-supplied OpenSSL)", u.what)
-		}
-	}
-	return nil
 }
 
 // cTypeName renders a declared type string (int, float, bool, string, []elem,
@@ -94,24 +64,116 @@ func cTypeName(t string) string {
 	return "mfl_" + t
 }
 
+// orderStructTypes returns types sorted so every struct-typed field's target
+// typedef is emitted before its user. p.Types lists user `type` decls before
+// the cstruct TypeDecls the parser synthesizes, so plain declaration order
+// emits e.g. a user struct holding a cstruct before that cstruct's mfl_
+// typedef exists — a hard cc error that `machin check` cannot see (#650).
+// Repeated-scan topological order (deps first, declaration order otherwise);
+// a by-value cycle is not expressible in C anyway, so leftovers emit as-is.
+// The selfhost compiler mirrors this exact scan in struct_type_order().
+func orderStructTypes(types []*TypeDecl) []*TypeDecl {
+	index := make(map[string]int, len(types))
+	for i, td := range types {
+		index[td.Name] = i
+	}
+	done := make([]bool, len(types))
+	out := make([]*TypeDecl, 0, len(types))
+	for remaining := len(types); remaining > 0; {
+		progressed := false
+		for i, td := range types {
+			if done[i] {
+				continue
+			}
+			ready := true
+			for _, f := range td.Fields {
+				if dep, ok := index[f.Type]; ok && dep != i && !done[dep] {
+					ready = false
+					break
+				}
+			}
+			if ready {
+				done[i] = true
+				out = append(out, td)
+				remaining--
+				progressed = true
+			}
+		}
+		if !progressed { // dependency cycle: emit the rest in declaration order
+			for i, td := range types {
+				if !done[i] {
+					done[i] = true
+					out = append(out, td)
+				}
+			}
+		}
+	}
+	return out
+}
+
+// orderCStructs applies the same dependency ordering to cstructs for their
+// mfl_from_/mfl_to_ converters: a nested cstruct field calls the inner
+// struct's converters, which must already be defined (they are static).
+func orderCStructs(css []ExternStruct, names map[string]bool) []ExternStruct {
+	index := make(map[string]int, len(css))
+	for i := range css {
+		index[css[i].Name] = i
+	}
+	done := make([]bool, len(css))
+	out := make([]ExternStruct, 0, len(css))
+	for remaining := len(css); remaining > 0; {
+		progressed := false
+		for i := range css {
+			if done[i] {
+				continue
+			}
+			ready := true
+			for _, f := range css[i].Fields {
+				if names[f.CType] {
+					if dep, ok := index[f.CType]; ok && dep != i && !done[dep] {
+						ready = false
+						break
+					}
+				}
+			}
+			if ready {
+				done[i] = true
+				out = append(out, css[i])
+				remaining--
+				progressed = true
+			}
+		}
+		if !progressed {
+			for i := range css {
+				if !done[i] {
+					done[i] = true
+					out = append(out, css[i])
+				}
+			}
+		}
+	}
+	return out
+}
+
 type cgen struct {
 	c            *Checker
 	buf          strings.Builder // function bodies
 	tramp        strings.Builder // goroutine trampolines
 	goID         int
-	jsonFns      strings.Builder      // generated per-type JSON serializers + parsers
-	unaliased    map[string]bool      // "inst\x00var" -> append may grow in place (#578)
-	cover        bool                 // emit function-entry coverage counters (#589)
-	covIdx       map[string]int       // source function name -> counter slot
-	covNames     []string             // counter slot -> source function name
-	covStmt      map[Stmt]int         // statement -> counter slot (#589 stage B2)
-	covStmtOwner []string             // statement slot -> owning source function name
-	sortFns      strings.Builder      // generated per-element-type sort_by comparators (#580)
-	sortMemo     map[string]string    // element C type -> comparator function name
+	jsonFns      strings.Builder   // generated per-type JSON serializers + parsers
+	jsonProtos   strings.Builder   // JSON ser/deser prototypes (emitted before bodies)
+	unaliased    map[string]bool   // "inst\x00var" -> append may grow in place (#578)
+	cover        bool              // emit function-entry coverage counters (#589)
+	covIdx       map[string]int    // source function name -> counter slot
+	covNames     []string          // counter slot -> source function name
+	covStmt      map[Stmt]int      // statement -> counter slot (#589 stage B2)
+	covStmtOwner []string          // statement slot -> owning source function name
+	sortFns      strings.Builder   // generated per-element-type sort_by comparators (#580)
+	sortMemo     map[string]string // element C type -> comparator function name
 	sortID       int
-	copyFns      strings.Builder      // generated per-type deep copiers (#639)
-	copyProtos   strings.Builder      // ...and their prototypes, for recursive types
-	copyMemo     map[string]string    // type string -> deep-copy function name
+	copyFns      strings.Builder   // generated per-type deep copiers (#639)
+	copyProtos   strings.Builder   // ...and their prototypes, for recursive types
+	copyMemo     map[string]string // type string -> deep-copy function name
 	copyID       int
 	jsonMemo     map[string]string    // type string -> serializer function name
 	parseMemo    map[string]string    // type string -> parser function name
@@ -668,7 +730,7 @@ static void mfl_sleep(int64_t ms) {
    Scalar elements need neither and are a plain memcpy. */
 static char* mfl_dup_arena(const char* s, size_t n); /* defined later in the runtime */
 typedef struct { uint8_t* data; int64_t len; } mfl_bytes;
-typedef struct mfl_cnode { struct mfl_cnode* next; void* data; } mfl_cnode;
+typedef struct mfl_cnode { struct mfl_cnode* next; void* data; const char* gid; } mfl_cnode;
 typedef struct {
     pthread_mutex_t mu; pthread_cond_t cnd;
     mfl_cnode *head, *tail; int64_t es; int closed;
@@ -725,6 +787,27 @@ static void mfl_thaw_strs(int nstr, int* stroff, void* elem) {
 }
 static void mfl_chan_freeze(mfl_chan* c, void* elem) { mfl_freeze_strs(c->nstr, c->stroff, elem); }
 static void mfl_chan_thaw(mfl_chan* c, void* elem) { mfl_thaw_strs(c->nstr, c->stroff, elem); }
+/* promote_strs: copy each string/bytes field (at the given offsets) into the
+   MAIN arena, leaving the source value's pointers replaced with the copies.
+   Used when a value is stored into package-global storage from a scoped or
+   goroutine arena, whose reclamation would otherwise leave the global
+   dangling (#648). A no-op on the main arena itself, so ordinary stores pay
+   one comparison. */
+static void mfl_promote_strs(int nstr, int* stroff, void* elem) {
+    if (!mfl_arena_cur || mfl_arena_cur == &mfl_main_arena) return;
+    mfl_arena* cur = mfl_arena_cur;
+    mfl_arena_cur = &mfl_main_arena;
+    for (int i = 0; i < nstr; i++) {
+        if (stroff[i] < 0) { /* bytes field: -(1+offset); copy len bytes, not strlen */
+            mfl_bytes* b = (mfl_bytes*)((char*)elem + (-stroff[i] - 1));
+            if (b->data && b->len > 0) { uint8_t* a = (uint8_t*)mfl_alloc((size_t)b->len); memcpy(a, b->data, (size_t)b->len); b->data = a; }
+            continue;
+        }
+        char** p = (char**)((char*)elem + stroff[i]);
+        if (*p) { size_t n = strlen(*p) + 1; char* a = (char*)mfl_alloc(n); memcpy(a, *p, n); *p = a; }
+    }
+    mfl_arena_cur = cur;
+}
 /* record/replay hooks (defined below, before mfl_chan_send). */
 static void mfl_rr_enter(void); static void mfl_rr_mark(void); static void mfl_rr_exit(void);
 /* close a channel: receivers drain the buffer then get "not ok". Wakes every
@@ -960,9 +1043,12 @@ static void mfl_panic(const char* msg) {
     exit(1);
 }
 
-/* runtime deadlock detector. machin channels are unbounded, so send never blocks — the
-   only blocking op is recv on an empty, open channel. A deadlock is every live goroutine
-   parked in such a recv, with no one left to send. Track live vs. blocked goroutines and,
+/* runtime deadlock detector. machin channels are unbounded queues — a send
+   never blocks — but a goroutine can never receive its OWN queued sends (#673),
+   so the only blocking op is a receive with no receivable node: an empty open
+   channel, or one whose head is the receiver's own send. A deadlock is every
+   live goroutine parked in such a receive, with no one left to send. Track
+   live vs. blocked goroutines and,
    the moment they meet, report + exit(2) instead of hanging forever. main is one live
    goroutine; a spawned goroutine is counted from its spawn site until its body returns. */
 static pthread_mutex_t mfl_dl_mu = PTHREAD_MUTEX_INITIALIZER;
@@ -1082,6 +1168,7 @@ static void mfl_dl_deadlock(void) {
 static void mfl_chan_send(mfl_chan* c, const void* v) {
     mfl_rr_enter();
     mfl_cnode* n = malloc(sizeof(mfl_cnode));
+    n->gid = mfl_gid_path;   /* sender id — receivers never take their own nodes (#673) */
     if (c->ser) {
         char* j = c->ser(v);                 /* arena JSON of the whole value */
         size_t L = strlen(j);
@@ -1100,6 +1187,15 @@ static void mfl_chan_send(mfl_chan* c, const void* v) {
     mfl_dl_note(); /* a send is channel progress — resets the deadlock watchdog */
     mfl_rr_exit();
 }
+/* a queued node is receivable by this goroutine iff it was sent by a DIFFERENT
+   goroutine (or the channel is closed and draining — post-close order is
+   preserved and self-delivery no longer matters). #673: without this, a send
+   followed by a receive in one goroutine satisfied itself and spun at 100% CPU —
+   the keeper-lock idiom turned into a busy loop. */
+static int mfl_chan_head_mine(mfl_chan* c) {
+    const char* me = mfl_gid_path ? mfl_gid_path : "0";
+    return c->head && c->head->gid && strcmp(c->head->gid, me) == 0;
+}
 /* deliver node n's payload into out (receiver arena), then free the node. */
 static void mfl_chan_deliver(mfl_chan* c, mfl_cnode* n, void* out) {
     if (c->des) {
@@ -1116,9 +1212,13 @@ static void mfl_chan_deliver(mfl_chan* c, mfl_cnode* n, void* out) {
 static int mfl_chan_recv2(mfl_chan* c, void* out) {
     mfl_rr_enter();
     pthread_mutex_lock(&c->mu);
-    if (!c->head && !c->closed) {
+    if (!c->closed && (!c->head || mfl_chan_head_mine(c))) {
+        /* empty, or the head node is this goroutine's own send — either way
+           there is nothing THIS goroutine may receive; park. A dequeue by
+           another receiver broadcasts below so we re-check the new head. */
         mfl_dl_block(c->id); /* about to park on an empty open channel */
-        while (!c->head && !c->closed) pthread_cond_wait(&c->cnd, &c->mu);
+        while (!c->closed && (!c->head || mfl_chan_head_mine(c)))
+            pthread_cond_wait(&c->cnd, &c->mu);
         mfl_dl_unblock();
     }
     mfl_cnode* n = c->head;
@@ -1128,6 +1228,7 @@ static int mfl_chan_recv2(mfl_chan* c, void* out) {
     if (!n) { mfl_rr_mark(); pthread_mutex_unlock(&c->mu); mfl_rr_exit(); return 0; }
     c->head = n->next;
     if (!c->head) c->tail = NULL;
+    pthread_cond_broadcast(&c->cnd);   /* head changed — wake receivers skipping own nodes */
     mfl_rr_mark();
     pthread_mutex_unlock(&c->mu);
     mfl_chan_deliver(c, n, out);
@@ -1143,7 +1244,11 @@ static void mfl_chan_recv(mfl_chan* c, void* out) {
 static int mfl_chan_tryrecv2(mfl_chan* c, void* out, int* ok) {
     pthread_mutex_lock(&c->mu);
     mfl_cnode* n = c->head;
-    if (n) { c->head = n->next; if (!c->head) c->tail = NULL; }
+    /* a select recv is not ready while the head node is this goroutine's own
+       send (#673) — same rule as the blocking recv, or select would deliver
+       self-sent values the blocking path refuses. */
+    if (n && !c->closed && mfl_chan_head_mine(c)) n = NULL;
+    if (n) { c->head = n->next; if (!c->head) c->tail = NULL; pthread_cond_broadcast(&c->cnd); }
     int closed = c->closed;
     /* a select recv that fires IS an ordered channel effect — mark it in schedule
        order (under c->mu, like mfl_chan_recv2) so a select-using program records a
@@ -1155,7 +1260,6 @@ static int mfl_chan_tryrecv2(mfl_chan* c, void* out, int* ok) {
     if (closed) { memset(out, 0, c->es); *ok = 0; return 1; }
     return 0;
 }
-
 /* maps: a chained hash table keyed by int64 or string, fixed-size values */
 typedef struct mfl_ment { struct mfl_ment* next; int64_t ik; char* sk; void* val; } mfl_ment;
 typedef struct { mfl_ment** buckets; int64_t nb, count, vs; int sk; int ar; } mfl_map;
@@ -1366,14 +1470,27 @@ static mfl_mmap_result mfl_mmap_file(const char* path) {
    pointer the program alloc'd, then passes it here. */
 static char* mfl_ptr_str(int64_t p) { return p ? mfl_dup((const char*)(intptr_t)p) : mfl_dup(""); }
 static void mfl_poke_f32(int64_t p, int64_t o, double v) { *(float*)((char*)(intptr_t)p + o) = (float)v; }
+static void mfl_poke_f64(int64_t p, int64_t o, double v) { *(double*)((char*)(intptr_t)p + o) = v; }
+static void mfl_poke_i8(int64_t p, int64_t o, int64_t v) { *(int8_t*)((char*)(intptr_t)p + o) = (int8_t)v; }
+static void mfl_poke_i16(int64_t p, int64_t o, int64_t v) { *(int16_t*)((char*)(intptr_t)p + o) = (int16_t)v; }
 static void mfl_poke_i32(int64_t p, int64_t o, int64_t v) { *(int32_t*)((char*)(intptr_t)p + o) = (int32_t)v; }
+static void mfl_poke_u32(int64_t p, int64_t o, int64_t v) { *(uint32_t*)((char*)(intptr_t)p + o) = (uint32_t)v; }
+static void mfl_poke_i64(int64_t p, int64_t o, int64_t v) { *(int64_t*)((char*)(intptr_t)p + o) = v; }
 static void mfl_poke_u8(int64_t p, int64_t o, int64_t v) { *(uint8_t*)((char*)(intptr_t)p + o) = (uint8_t)v; }
 static void mfl_poke_u16(int64_t p, int64_t o, int64_t v) { *(uint16_t*)((char*)(intptr_t)p + o) = (uint16_t)v; }
+static void mfl_poke_u64(int64_t p, int64_t o, int64_t v) { *(uint64_t*)((char*)(intptr_t)p + o) = (uint64_t)v; }
 static void mfl_poke_ptr(int64_t p, int64_t o, int64_t v) { *(void**)((char*)(intptr_t)p + o) = (void*)(intptr_t)v; }
 static double mfl_peek_f32(int64_t p, int64_t o) { return (double)*(float*)((char*)(intptr_t)p + o); }
-static int64_t mfl_peek_i32(int64_t p, int64_t o) { return (int64_t)*(int32_t*)((char*)(intptr_t)p + o); }
+static double mfl_peek_f64(int64_t p, int64_t o) { return *(double*)((char*)(intptr_t)p + o); }
 static int64_t mfl_peek_i8(int64_t p, int64_t o) { return (int64_t)*(int8_t*)((char*)(intptr_t)p + o); }
+static int64_t mfl_peek_i16(int64_t p, int64_t o) { return (int64_t)*(int16_t*)((char*)(intptr_t)p + o); }
+static int64_t mfl_peek_i32(int64_t p, int64_t o) { return (int64_t)*(int32_t*)((char*)(intptr_t)p + o); }
+static int64_t mfl_peek_u32(int64_t p, int64_t o) { return (int64_t)*(uint32_t*)((char*)(intptr_t)p + o); }
+static int64_t mfl_peek_i64(int64_t p, int64_t o) { return *(int64_t*)((char*)(intptr_t)p + o); }
 static int64_t mfl_peek_u8(int64_t p, int64_t o) { return (int64_t)*(uint8_t*)((char*)(intptr_t)p + o); }
+static int64_t mfl_peek_u16(int64_t p, int64_t o) { return (int64_t)*(uint16_t*)((char*)(intptr_t)p + o); }
+static int64_t mfl_peek_u64(int64_t p, int64_t o) { return (int64_t)*(uint64_t*)((char*)(intptr_t)p + o); }
+static int64_t mfl_peek_ptr(int64_t p, int64_t o) { return (int64_t)(intptr_t)*(void**)((char*)(intptr_t)p + o); }
 /* signed-byte dot product with a 32-bit accumulator (the vector-friendly width:
  * cc autovectorizes this where an int64 reduction stays half-speed). Exact while
  * |sum| < 2^31 - always true for i8*i8 up to n ~ 133k - the quantized-matmul
@@ -5703,6 +5820,10 @@ const sqliteRuntime = `#include <sqlite3.h>
 static int64_t mfl_sqlite_open(const char* path) {
     sqlite3* db = NULL;
     if (sqlite3_open(path, &db) != SQLITE_OK) { sqlite3_close(db); return 0; }
+    /* #646: SQLite's default busy_timeout is 0, so a writer that loses a lock
+       race gets SQLITE_BUSY instantly and the write silently does not happen.
+       Wait up to 5s instead — the issue's own workaround, made the default. */
+    sqlite3_busy_timeout(db, 5000);
     return (int64_t)(intptr_t)db;
 }
 static int64_t mfl_sqlite_exec(int64_t h, const char* sql) {
@@ -6749,8 +6870,12 @@ func (g *cgen) program(p *Program) (string, error) {
 			fmt.Fprintf(&out, "%sextern %s %s(%s);\n", attr, externCType(ef.Ret), ef.Name, ps)
 		}
 	}
-	// struct typedefs, in declaration order (a struct may reference earlier ones)
-	for _, td := range p.Types {
+	// struct typedefs in dependency order: a struct field whose type names
+	// another declared struct needs that struct's mfl_ typedef first. p.Types
+	// lists user `type` decls before the cstruct TypeDecls the parser
+	// synthesizes, so declaration order alone emits user→cstruct fields (and
+	// forward cstruct→cstruct fields) before their target typedef — #650.
+	for _, td := range orderStructTypes(p.Types) {
 		if td.COpaque != "" {
 			// an opaque FFI handle: wrap the real C type by value in one hidden field
 			fmt.Fprintf(&out, "typedef struct { %s _c; } mfl_%s;\n", td.COpaque, td.Name)
@@ -6771,41 +6896,43 @@ func (g *cgen) program(p *Program) (string, error) {
 			cstructNames[cs.Name] = true
 		}
 	}
+	var allCStructs []ExternStruct
 	for _, ed := range p.Externs {
-		for _, cs := range ed.Structs {
-			if cs.Opaque {
-				// copy the whole C struct in/out of the one-field MFL wrapper
-				fmt.Fprintf(&out, "static mfl_%s mfl_from_%s(%s c) { return (mfl_%s){ ._c = c }; }\n", cs.Name, cs.Name, cs.Name, cs.Name)
-				fmt.Fprintf(&out, "static %s mfl_to_%s(mfl_%s m) { return m._c; }\n", cs.Name, cs.Name, cs.Name)
-				continue
-			}
-			fmt.Fprintf(&out, "static mfl_%s mfl_from_%s(%s c) { return (mfl_%s){", cs.Name, cs.Name, cs.Name, cs.Name)
-			for _, f := range cs.Fields {
-				if cstructNames[f.CType] {
-					fmt.Fprintf(&out, " .f_%s = mfl_from_%s(c.%s),", f.Name, f.CType, f.Name)
-				} else if f.CType == "ptr" {
-					fmt.Fprintf(&out, " .f_%s = (int64_t)(intptr_t)c.%s,", f.Name, f.Name)
-				} else {
-					fmt.Fprintf(&out, " .f_%s = c.%s,", f.Name, f.Name)
-				}
-			}
-			out.WriteString(" }; }\n")
-			fmt.Fprintf(&out, "static %s mfl_to_%s(mfl_%s m) { return (%s){", cs.Name, cs.Name, cs.Name, cs.Name)
-			for _, f := range cs.Fields {
-				if cstructNames[f.CType] {
-					fmt.Fprintf(&out, " .%s = mfl_to_%s(m.f_%s),", f.Name, f.CType, f.Name)
-				} else if f.CType == "ptr" {
-					// a pointer field: MFL holds it as an int; void* converts to the
-					// real C field type (float*, unsigned char*, ...).
-					fmt.Fprintf(&out, " .%s = (void*)(intptr_t)m.f_%s,", f.Name, f.Name)
-				} else if lo, hi, isNarrow := narrowRange(f.CType); isNarrow && g.safe {
-					fmt.Fprintf(&out, " .%s = (%s)mfl_narrow(m.f_%s, %d, %d, \"%s field '%s'\"),", f.Name, ffiCType(f.CType), f.Name, lo, hi, f.CType, f.Name)
-				} else {
-					fmt.Fprintf(&out, " .%s = (%s)m.f_%s,", f.Name, ffiCType(f.CType), f.Name)
-				}
-			}
-			out.WriteString(" }; }\n")
+		allCStructs = append(allCStructs, ed.Structs...)
+	}
+	for _, cs := range orderCStructs(allCStructs, cstructNames) {
+		if cs.Opaque {
+			// copy the whole C struct in/out of the one-field MFL wrapper
+			fmt.Fprintf(&out, "static mfl_%s mfl_from_%s(%s c) { return (mfl_%s){ ._c = c }; }\n", cs.Name, cs.Name, cs.Name, cs.Name)
+			fmt.Fprintf(&out, "static %s mfl_to_%s(mfl_%s m) { return m._c; }\n", cs.Name, cs.Name, cs.Name)
+			continue
 		}
+		fmt.Fprintf(&out, "static mfl_%s mfl_from_%s(%s c) { return (mfl_%s){", cs.Name, cs.Name, cs.Name, cs.Name)
+		for _, f := range cs.Fields {
+			if cstructNames[f.CType] {
+				fmt.Fprintf(&out, " .f_%s = mfl_from_%s(c.%s),", f.Name, f.CType, f.Name)
+			} else if f.CType == "ptr" {
+				fmt.Fprintf(&out, " .f_%s = (int64_t)(intptr_t)c.%s,", f.Name, f.Name)
+			} else {
+				fmt.Fprintf(&out, " .f_%s = c.%s,", f.Name, f.Name)
+			}
+		}
+		out.WriteString(" }; }\n")
+		fmt.Fprintf(&out, "static %s mfl_to_%s(mfl_%s m) { return (%s){", cs.Name, cs.Name, cs.Name, cs.Name)
+		for _, f := range cs.Fields {
+			if cstructNames[f.CType] {
+				fmt.Fprintf(&out, " .%s = mfl_to_%s(m.f_%s),", f.Name, f.CType, f.Name)
+			} else if f.CType == "ptr" {
+				// a pointer field: MFL holds it as an int; void* converts to the
+				// real C field type (float*, unsigned char*, ...).
+				fmt.Fprintf(&out, " .%s = (void*)(intptr_t)m.f_%s,", f.Name, f.Name)
+			} else if lo, hi, isNarrow := narrowRange(f.CType); isNarrow && g.safe {
+				fmt.Fprintf(&out, " .%s = (%s)mfl_narrow(m.f_%s, %d, %d, \"%s field '%s'\"),", f.Name, ffiCType(f.CType), f.Name, lo, hi, f.CType, f.Name)
+			} else {
+				fmt.Fprintf(&out, " .%s = (%s)m.f_%s,", f.Name, ffiCType(f.CType), f.Name)
+			}
+		}
+		out.WriteString(" }; }\n")
 	}
 	// closure environment + multi-return result structs (one per instance)
 	for _, inst := range g.c.Reps() {
@@ -6830,8 +6957,10 @@ func (g *cgen) program(p *Program) (string, error) {
 	if len(p.Types) > 0 {
 		out.WriteByte('\n')
 	}
-	// JSON serializers (generated on demand by json()); reference struct typedefs
+	// JSON serializers (generated on demand by json()); reference struct typedefs.
+	// Prototypes first: recursive types' serializers reference each other.
 	if g.jsonFns.Len() > 0 {
+		out.WriteString(g.jsonProtos.String())
 		out.WriteString(g.jsonFns.String())
 		out.WriteByte('\n')
 	}
@@ -7228,7 +7357,17 @@ func (g *cgen) stmt(s Stmt, depth int) error {
 			g.buf.WriteString("(void)(" + e + ");\n")
 			return nil
 		}
-		fmt.Fprintf(&g.buf, "%s = %s;\n", g.varRef(st.Name), e)
+		ref := g.varRef(st.Name)
+		if ref == "mfl_g_"+st.Name {
+			// storing into package-global storage: keep arena-backed payload
+			// alive past the assigning goroutine/arena block (#648)
+			var err error
+			e, err = g.promoteGlobal(g.c.typeStringSlot(g.c.globalSlot[st.Name]), e)
+			if err != nil {
+				return err
+			}
+		}
+		fmt.Fprintf(&g.buf, "%s = %s;\n", ref, e)
 		g.emitProbe(st.Name, g.c.NodeKind(g.curFn, st.Val), depth)
 	case *ReturnStmt:
 		if len(st.Vals) == 0 {
@@ -7307,6 +7446,10 @@ func (g *cgen) stmt(s Stmt, depth int) error {
 		if err != nil {
 			return err
 		}
+		val, err = g.promoteIntoGlobal(st.Target.X, st.Val, val)
+		if err != nil {
+			return err
+		}
 		if g.c.NodeKind(g.curFn, st.Target.X) == KMap {
 			ik, sk := g.mapKeyArgs(st.Target.X, idx)
 			vt := g.c.MapValCType(g.curFn, st.Target.X)
@@ -7320,6 +7463,10 @@ func (g *cgen) stmt(s Stmt, depth int) error {
 			return err
 		}
 		val, err := g.expr(st.Val)
+		if err != nil {
+			return err
+		}
+		val, err = g.promoteIntoGlobal(st.Target.X, st.Val, val)
 		if err != nil {
 			return err
 		}
@@ -7520,12 +7667,23 @@ func (g *cgen) selectStmt(st *SelectStmt, depth int) error {
 }
 
 func (g *cgen) multiAssign(st *MultiAssign, depth int) error {
-	assign := func(name, val string) {
+	assign := func(name, val string) error {
 		if name == "_" {
-			return
+			return nil
+		}
+		ref := g.varRef(name)
+		if ref == "mfl_g_"+name {
+			// storing into package-global storage: keep arena-backed payload
+			// alive past the assigning goroutine/arena block (#648)
+			var err error
+			val, err = g.promoteGlobal(g.c.typeStringSlot(g.c.globalSlot[name]), val)
+			if err != nil {
+				return err
+			}
 		}
 		indentC(&g.buf, depth+1)
-		fmt.Fprintf(&g.buf, "%s = %s;\n", g.varRef(name), val)
+		fmt.Fprintf(&g.buf, "%s = %s;\n", ref, val)
+		return nil
 	}
 
 	if len(st.Rhs) == 1 {
@@ -7543,8 +7701,12 @@ func (g *cgen) multiAssign(st *MultiAssign, depth int) error {
 			fmt.Fprintf(&g.buf, "%s _rv%d; int _rok%d = mfl_chan_recv2(%s, &_rv%d);\n", et, id, id, ch, id)
 			indentC(&g.buf, depth+1)
 			fmt.Fprintf(&g.buf, "if (!_rok%d) memset(&_rv%d, 0, sizeof(_rv%d));\n", id, id, id)
-			assign(st.Names[0], fmt.Sprintf("_rv%d", id))
-			assign(st.Names[1], fmt.Sprintf("_rok%d", id))
+			if err := assign(st.Names[0], fmt.Sprintf("_rv%d", id)); err != nil {
+				return err
+			}
+			if err := assign(st.Names[1], fmt.Sprintf("_rok%d", id)); err != nil {
+				return err
+			}
 			indentC(&g.buf, depth)
 			g.buf.WriteString("}\n")
 			return nil
@@ -7573,7 +7735,9 @@ func (g *cgen) multiAssign(st *MultiAssign, depth int) error {
 				indentC(&g.buf, depth+1)
 				fmt.Fprintf(&g.buf, "%s _t%d = %s(%s);\n", ctype, id, cfn, strings.Join(args, ", "))
 				for i, name := range st.Names {
-					assign(name, fmt.Sprintf("_t%d.%s", id, fields[i]))
+					if err := assign(name, fmt.Sprintf("_t%d.%s", id, fields[i])); err != nil {
+						return err
+					}
 				}
 				indentC(&g.buf, depth)
 				g.buf.WriteString("}\n")
@@ -7597,7 +7761,9 @@ func (g *cgen) multiAssign(st *MultiAssign, depth int) error {
 			indentC(&g.buf, depth+1)
 			fmt.Fprintf(&g.buf, "%s_ret _t%d = %s(%s);\n", cn, id, cn, strings.Join(args, ", "))
 			for i, name := range st.Names {
-				assign(name, fmt.Sprintf("_t%d.r%d", id, i))
+				if err := assign(name, fmt.Sprintf("_t%d.r%d", id, i)); err != nil {
+					return err
+				}
 			}
 			indentC(&g.buf, depth)
 			g.buf.WriteString("}\n")
@@ -7608,7 +7774,15 @@ func (g *cgen) multiAssign(st *MultiAssign, depth int) error {
 		if err != nil {
 			return err
 		}
-		fmt.Fprintf(&g.buf, "%s = %s;\n", g.varRef(st.Names[0]), e)
+		ref := g.varRef(st.Names[0])
+		if ref == "mfl_g_"+st.Names[0] {
+			var perr error
+			e, perr = g.promoteGlobal(g.c.typeStringSlot(g.c.globalSlot[st.Names[0]]), e)
+			if perr != nil {
+				return perr
+			}
+		}
+		fmt.Fprintf(&g.buf, "%s = %s;\n", ref, e)
 		return nil
 	}
 
@@ -7625,7 +7799,9 @@ func (g *cgen) multiAssign(st *MultiAssign, depth int) error {
 		fmt.Fprintf(&g.buf, "%s _t%d_%d = %s;\n", g.c.NodeCType(g.curFn, e), id, i, ce)
 	}
 	for i, name := range st.Names {
-		assign(name, fmt.Sprintf("_t%d_%d", id, i))
+		if err := assign(name, fmt.Sprintf("_t%d_%d", id, i)); err != nil {
+			return err
+		}
 	}
 	indentC(&g.buf, depth)
 	g.buf.WriteString("}\n")
@@ -8292,7 +8468,13 @@ func (g *cgen) binaryCombine(ex *Binary, l, r string) string {
 // isBoxed reports whether a variable in the current instance is captured by a
 // closure and therefore heap-boxed (captured by reference).
 func (g *cgen) isBoxed(name string) bool {
-	return g.c.SrcFunc(g.curFn).Boxed[name]
+	sf := g.c.SrcFunc(g.curFn)
+	// "$globals" (package-var initializers) is a synthetic context with no
+	// FuncDecl instance — it has no locals, so nothing can be boxed there.
+	if sf == nil {
+		return false
+	}
+	return sf.Boxed[name]
 }
 
 // varRef is the C lvalue/rvalue for a variable: a plain local, or a dereference
@@ -8497,6 +8679,84 @@ func (g *cgen) chanNeedsJSON(typeStr string) bool {
 	return false
 }
 
+// promoteGlobal wraps a value stored into package-global storage so any
+// arena-backed payload is copied into the MAIN arena first (#648). Globals are
+// C statics that outlive every goroutine and arena { } block; without this, a
+// goroutine assigning a runtime-built string/slice/map/struct leaves the
+// global pointing into the child's arena, which mfl_go_run_* frees at exit —
+// a use-after-free. Scalars and channels carry no arena payload by value and
+// pass through unchanged, as does anything assigned on the main arena (the
+// emitted check is one comparison). String-bearing values use the same
+// offset table as channel freeze/thaw; slice/map values go through the JSON
+// round-trip with the arena switched to mfl_main_arena for the parse, which
+// also lands map entries in malloc (m->ar == 0) so later goroutine writes
+// stay stable.
+func (g *cgen) promoteGlobal(typeStr, e string) (string, error) {
+	if typeStr == "" {
+		return e, nil
+	}
+	if g.chanNeedsJSON(typeStr) {
+		ser, err := g.jsonSerializer(typeStr)
+		if err != nil {
+			return "", err
+		}
+		des, err := g.jsonParser(typeStr)
+		if err != nil {
+			return "", err
+		}
+		id := g.tmpID
+		g.tmpID++
+		ids := fmt.Sprint(id)
+		return fmt.Sprintf("({ %s _pg%s = %s; if (mfl_arena_cur != NULL && mfl_arena_cur != &mfl_main_arena) { char* _pj%s = %s(_pg%s); const char* _pp%s = _pj%s; mfl_arena* _pa%s = mfl_arena_cur; mfl_arena_cur = &mfl_main_arena; _pg%s = %s(&_pp%s); mfl_arena_cur = _pa%s; } _pg%s; })",
+			cTypeName(typeStr), ids, e,
+			ids, ser, ids,
+			ids, ids, ids,
+			ids, des, ids,
+			ids, ids), nil
+	}
+	offs := g.chanStrOffsets(typeStr, "")
+	if len(offs) == 0 {
+		return e, nil
+	}
+	id := g.tmpID
+	g.tmpID++
+	ids := fmt.Sprint(id)
+	return fmt.Sprintf("({ %s _pg%s = %s; mfl_promote_strs(%d, (int[]){%s}, &_pg%s); _pg%s; })",
+		cTypeName(typeStr), ids, e, len(offs), strings.Join(offs, ", "), ids, ids), nil
+}
+
+// promoteIntoGlobal applies promoteGlobal when the store's container
+// expression is rooted at a package global (#648): the value lands in
+// global-reachable storage, so its arena-backed payload must outlive the
+// current goroutine/arena block. Returns val unchanged for local targets.
+func (g *cgen) promoteIntoGlobal(target Expr, valExpr Expr, val string) (string, error) {
+	name, ok := globalRootName(target)
+	if !ok || g.c.IsLocal(g.curFn, name) {
+		return val, nil
+	}
+	if _, isG := g.c.globalSlot[name]; !isG {
+		return val, nil
+	}
+	return g.promoteGlobal(g.c.TypeString(g.curFn, valExpr), val)
+}
+
+// globalRootName peels an assignment target's container expression (index,
+// field, slice) down to its base identifier, reporting the name when the
+// store lands inside package-global storage (#648).
+func globalRootName(e Expr) (string, bool) {
+	switch n := e.(type) {
+	case *Ident:
+		return n.Name, true
+	case *Index:
+		return globalRootName(n.X)
+	case *FieldAccess:
+		return globalRootName(n.X)
+	case *SliceExpr:
+		return globalRootName(n.X)
+	}
+	return "", false
+}
+
 // chanJSONFns emits (once per type) the serialize/parse wrappers a JSON-mode
 // channel calls, returning their names. The wrappers adapt the generated
 // per-type JSON serializer/parser to the channel's void* calling convention.
@@ -8681,6 +8941,10 @@ func (g *cgen) jsonSerializer(typeStr string) (string, error) {
 	g.jsonID++
 	g.jsonMemo[typeStr] = name // reserve before recursion
 	ct := cTypeName(typeStr)
+	// A PROTOTYPE, BECAUSE TYPES RECURSE: a struct with a []Self field makes
+	// the slice serializer reference the struct serializer reserved-but-not-yet
+	// emitted (same hazard copyProtos solves for deepCopier, #639).
+	fmt.Fprintf(&g.jsonProtos, "static char* %s(%s v);\n", name, ct)
 	var body string
 
 	switch {
@@ -8692,6 +8956,8 @@ func (g *cgen) jsonSerializer(typeStr string) (string, error) {
 		body = `return mfl_dup(v ? "true" : "false");`
 	case typeStr == "string":
 		body = "return mfl_json_str(v);"
+	case typeStr == "bytes":
+		body = "return mfl_json_str(mfl_base64_encode_bytes(v));"
 	case strings.HasPrefix(typeStr, "[]"):
 		elem := typeStr[2:]
 		es, err := g.jsonSerializer(elem)
@@ -8774,6 +9040,7 @@ func (g *cgen) jsonParser(typeStr string) (string, error) {
 	g.jsonID++
 	g.parseMemo[typeStr] = name
 	ct := cTypeName(typeStr)
+	fmt.Fprintf(&g.jsonProtos, "static %s %s(const char** p);\n", ct, name)
 	var body string
 
 	switch {
@@ -8785,6 +9052,8 @@ func (g *cgen) jsonParser(typeStr string) (string, error) {
 		body = "return mfl_js_bool(p);"
 	case typeStr == "string":
 		body = "return mfl_js_str(p);"
+	case typeStr == "bytes":
+		body = "return mfl_base64_decode_bytes(mfl_js_str(p));"
 	case strings.HasPrefix(typeStr, "[]"):
 		elem := typeStr[2:]
 		ep, err := g.jsonParser(elem)
@@ -9308,9 +9577,13 @@ func (g *cgen) callBody(ex *Call, args []string) (string, error) {
 		return fmt.Sprintf("mfl_raw_free(%s)", args[0]), nil
 	case "madvise_free":
 		return fmt.Sprintf("mfl_madvise_free(%s, %s)", args[0], args[1]), nil
-	case "poke_f32", "poke_i32", "poke_u8", "poke_u16", "poke_ptr":
+	case "poke_f32", "poke_f64":
 		return fmt.Sprintf("mfl_%s(%s, %s, %s)", ex.Callee, args[0], args[1], args[2]), nil
-	case "peek_f32", "peek_i32", "peek_i8", "peek_u8":
+	case "poke_i8", "poke_i16", "poke_i32", "poke_i64", "poke_u8", "poke_u16", "poke_u32", "poke_u64", "poke_ptr":
+		return fmt.Sprintf("mfl_%s(%s, %s, %s)", ex.Callee, args[0], args[1], args[2]), nil
+	case "peek_f32", "peek_f64":
+		return fmt.Sprintf("mfl_%s(%s, %s)", ex.Callee, args[0], args[1]), nil
+	case "peek_i8", "peek_i16", "peek_i32", "peek_i64", "peek_u8", "peek_u16", "peek_u32", "peek_u64", "peek_ptr":
 		return fmt.Sprintf("mfl_%s(%s, %s)", ex.Callee, args[0], args[1]), nil
 	case "dot_i8":
 		return fmt.Sprintf("mfl_dot_i8(%s, %s, %s)", args[0], args[1], args[2]), nil

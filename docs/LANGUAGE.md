@@ -533,9 +533,9 @@ first := users[0]                                // value copy
 | `zlib_decompress(b)`        | zlib-decompress a raw zlib stream → `bytes`; empty on an invalid stream |
 | `bytes_index(b, needle, from)` | find `needle` in `b` at/after index `from`, NUL-safe (`-1` if absent); for binary protocols / multipart boundaries |
 | `alloc(n)` / `free(p)`      | allocate/free `n` zeroed raw bytes on the heap → pointer (an `int`); for building C buffers/structs to pass over FFI |
-| `poke_f32(p, off, v)` / `peek_f32(p, off)` | write/read a 4-byte float at byte offset `off` from pointer `p` |
-| `poke_i32(p, off, v)` / `peek_i32(p, off)` | write/read a 4-byte int at byte offset `off` from pointer `p` |
-| `poke_u8(p, off, v)` / `poke_u16(p, off, v)` / `poke_ptr(p, off, v)` | write a 1-byte / 2-byte / pointer-sized value at byte offset `off` from pointer `p` |
+| `poke_f32(p, off, v)` / `poke_f64(p, off, v)` / `peek_f32(p, off)` / `peek_f64(p, off)` | write/read a 4-byte / 8-byte float at byte offset `off` from pointer `p` |
+| `poke_i8`/`poke_i16`/`poke_i32`/`poke_i64`/`poke_u8`/`poke_u16`/`poke_u32`/`poke_u64` and `peek_i8`/`peek_i16`/`peek_i32`/`peek_i64`/`peek_u8`/`peek_u16`/`peek_u32`/`peek_u64` `(p, off[, v])` | write/read a signed or unsigned int of the named width at byte offset `off` (`i` sign-extends on read, `u` zero-extends) |
+| `poke_ptr(p, off, v)` / `peek_ptr(p, off)` | write/read a pointer-sized value at byte offset `off` from pointer `p` |
 | `ptr_str(p)`                | read a NUL-terminated C string at pointer `p` → `string` |
 | `raw_mode(on)`              | toggle terminal raw mode (`1` enable, `0` restore) for uncooked keyboard input |
 | `read_key()`                | read one keypress from stdin (requires `raw_mode(1)`) |
@@ -586,7 +586,7 @@ on the build/runtime host, e.g. `apt install libsqlite3-dev` on Debian/Ubuntu).
 | Builtin                          | Purpose                                                                 |
 |----------------------------------|-------------------------------------------------------------------------|
 | `sqlite_open(path) -> int`       | open or create a SQLite database file → handle (`0` on failure); `":memory:"` opens a transient in-memory db |
-| `sqlite_exec(h, sql[, []string]) -> int` | run result-less SQL (CREATE/INSERT/UPDATE/DELETE); optional `[]string` binds `?` params (injection-safe); returns `0` on success |
+| `sqlite_exec(h, sql[, []string]) -> int` | run result-less SQL (CREATE/INSERT/UPDATE/DELETE); optional `[]string` binds `?` params (injection-safe); returns the sqlite3 result code — `0` on success, **nonzero on failure** (e.g. `5` BUSY, `19` CONSTRAINT), so a lost write is detectable; handles open with a 5s `busy_timeout` so lock races wait instead of vanishing |
 | `sqlite_query(h, sql[, []string]) -> string` | run a SELECT → **JSON array-of-row-objects** string; optional `[]string` binds `?` params; returns `""` on failure — `"[]"` is a valid empty result, so check for `""` and call `sqlite_errmsg(h)` for the reason; decode with `parse(rows, []T{})` for a typed slice, or `json_get` for a single field |
 | `sqlite_errmsg(h) -> string`    | the db handle's most recent error message (`""` for a bad handle); pair with `sqlite_query` `""` results and nonzero `sqlite_exec` codes |
 | `sqlite_close(h) -> int`         | close the database handle                                               |
@@ -829,6 +829,12 @@ Values that need to outlive the block must either be assigned to an outer variab
 ### Zero-copy slice borrows
 Full-range slice slicing (`s[0:len(s)]`) and sub-byte operations (`bytes_sub`) borrow directly from the parent backing buffer without triggering duplicate memory allocations.
 
+Values stored into package-global `var`s are promoted automatically: a
+string, slice, map, struct, or `bytes` assigned to a global — directly, via
+multi-assign, or as an element/field of a global container — is copied into
+the main arena first, so it stays valid after the assigning goroutine or
+`arena { }` block ends.
+
 ---
 
 ## Safety checks (`--safe`)
@@ -846,7 +852,9 @@ machin run   app.mfl --safe
 
 These checks add overhead, so they are opt-in rather than always on; a
 separate `--race-safe` flag (not related to `--safe`) refuses to build if a
-data race is inferred in `go`/channel usage.
+data race is inferred in `go`/channel usage or across machweb request
+handlers (`serve`, `serve_on`, `serve_on_quiet`, `serve_tls`, and `route`
+handlers under `serve_router` — each runs on its own per-request goroutine).
 
 ---
 
