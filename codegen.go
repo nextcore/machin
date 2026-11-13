@@ -358,24 +358,7 @@ static void mfl_arena_warn(mfl_arena* a) {
     fflush(stderr);
 }
 
-static void* mfl_alloc(size_t sz) {
-    if (!mfl_arena_cur) mfl_arena_cur = &mfl_main_arena;
-    if (sz == 0) sz = 1;
-    size_t aligned_sz = (sz + 7) & ~7; /* 8-byte alignment */
-
-    mfl_arena* a = mfl_arena_cur;
-    mfl_chunk* c = a->cur;
-
-    /* Fast path: Goose-style pointer bump */
-    if (c && c->used + aligned_sz <= c->cap) {
-        void* p = (void*)(c->data + c->used);
-        c->used += aligned_sz;
-        a->bytes += sz;
-        if (!a->scoped && !a->warned && a->bytes > mfl_arena_warn_bytes) mfl_arena_warn(a);
-        return p;
-    }
-
-    /* Slow path: allocate a new chunk or take from recycled head chunk */
+static void* mfl_alloc_slow(mfl_arena* a, size_t sz, size_t aligned_sz) {
     size_t alloc_cap = aligned_sz > MFL_CHUNK_SIZE ? aligned_sz : MFL_CHUNK_SIZE;
     mfl_chunk* nc = NULL;
     if (alloc_cap == MFL_CHUNK_SIZE && a->recycled) {
@@ -400,6 +383,24 @@ static void* mfl_alloc(size_t sz) {
     a->bytes += sz;
     if (!a->scoped && !a->warned && a->bytes > mfl_arena_warn_bytes) mfl_arena_warn(a);
     return (void*)nc->data;
+}
+
+static inline void* mfl_alloc(size_t sz) {
+    if (!mfl_arena_cur) mfl_arena_cur = &mfl_main_arena;
+    if (sz == 0) sz = 1;
+    size_t aligned_sz = (sz + 7) & ~7; /* 8-byte alignment */
+
+    mfl_arena* a = mfl_arena_cur;
+    mfl_chunk* c = a->cur;
+
+    /* Fast path: Goose-style pointer bump */
+    if (__builtin_expect(c != NULL && c->used + aligned_sz <= c->cap, 1)) {
+        void* p = (void*)(c->data + c->used);
+        c->used += aligned_sz;
+        a->bytes += sz;
+        return p;
+    }
+    return mfl_alloc_slow(a, sz, aligned_sz);
 }
 
 /* mfl_release / tip-rewind (drop-on-last-use):
@@ -596,6 +597,21 @@ static void* mfl_realloc_owned(void* old, size_t old_sz, size_t new_sz) {
             c->used += diff;
             a->bytes += (new_sz > old_sz ? new_sz - old_sz : 0);
             return old;
+        }
+        /* If it filled the entire chunk from start, realloc the chunk in place */
+        if ((char*)old == c->data) {
+            mfl_chunk* nc = (mfl_chunk*)realloc(c, sizeof(mfl_chunk) + new_aligned);
+            if (nc) {
+                nc->cap = new_aligned;
+                nc->used = new_aligned;
+                a->bytes += (new_sz > old_sz ? new_sz - old_sz : 0);
+                if (a->head == c) a->head = nc;
+                a->cur = nc;
+                mfl_chunk* p = a->head;
+                while (p && p != c && p->next != c) p = p->next;
+                if (p && p->next == c) p->next = nc;
+                return (void*)nc->data;
+            }
         }
     }
     void* p = mfl_alloc(new_sz);
@@ -1464,28 +1480,28 @@ static mfl_mmap_result mfl_mmap_file(const char* path) {
    host->wasm direction: the JS host writes UTF-8 + a NUL into wasm memory at a
    pointer the program alloc'd, then passes it here. */
 static char* mfl_ptr_str(int64_t p) { return p ? mfl_dup((const char*)(intptr_t)p) : mfl_dup(""); }
-static void mfl_poke_f32(int64_t p, int64_t o, double v) { *(float*)((char*)(intptr_t)p + o) = (float)v; }
-static void mfl_poke_f64(int64_t p, int64_t o, double v) { *(double*)((char*)(intptr_t)p + o) = v; }
-static void mfl_poke_i8(int64_t p, int64_t o, int64_t v) { *(int8_t*)((char*)(intptr_t)p + o) = (int8_t)v; }
-static void mfl_poke_i16(int64_t p, int64_t o, int64_t v) { *(int16_t*)((char*)(intptr_t)p + o) = (int16_t)v; }
-static void mfl_poke_i32(int64_t p, int64_t o, int64_t v) { *(int32_t*)((char*)(intptr_t)p + o) = (int32_t)v; }
-static void mfl_poke_u32(int64_t p, int64_t o, int64_t v) { *(uint32_t*)((char*)(intptr_t)p + o) = (uint32_t)v; }
-static void mfl_poke_i64(int64_t p, int64_t o, int64_t v) { *(int64_t*)((char*)(intptr_t)p + o) = v; }
-static void mfl_poke_u8(int64_t p, int64_t o, int64_t v) { *(uint8_t*)((char*)(intptr_t)p + o) = (uint8_t)v; }
-static void mfl_poke_u16(int64_t p, int64_t o, int64_t v) { *(uint16_t*)((char*)(intptr_t)p + o) = (uint16_t)v; }
-static void mfl_poke_u64(int64_t p, int64_t o, int64_t v) { *(uint64_t*)((char*)(intptr_t)p + o) = (uint64_t)v; }
-static void mfl_poke_ptr(int64_t p, int64_t o, int64_t v) { *(void**)((char*)(intptr_t)p + o) = (void*)(intptr_t)v; }
-static double mfl_peek_f32(int64_t p, int64_t o) { return (double)*(float*)((char*)(intptr_t)p + o); }
-static double mfl_peek_f64(int64_t p, int64_t o) { return *(double*)((char*)(intptr_t)p + o); }
-static int64_t mfl_peek_i8(int64_t p, int64_t o) { return (int64_t)*(int8_t*)((char*)(intptr_t)p + o); }
-static int64_t mfl_peek_i16(int64_t p, int64_t o) { return (int64_t)*(int16_t*)((char*)(intptr_t)p + o); }
-static int64_t mfl_peek_i32(int64_t p, int64_t o) { return (int64_t)*(int32_t*)((char*)(intptr_t)p + o); }
-static int64_t mfl_peek_u32(int64_t p, int64_t o) { return (int64_t)*(uint32_t*)((char*)(intptr_t)p + o); }
-static int64_t mfl_peek_i64(int64_t p, int64_t o) { return *(int64_t*)((char*)(intptr_t)p + o); }
-static int64_t mfl_peek_u8(int64_t p, int64_t o) { return (int64_t)*(uint8_t*)((char*)(intptr_t)p + o); }
-static int64_t mfl_peek_u16(int64_t p, int64_t o) { return (int64_t)*(uint16_t*)((char*)(intptr_t)p + o); }
-static int64_t mfl_peek_u64(int64_t p, int64_t o) { return (int64_t)*(uint64_t*)((char*)(intptr_t)p + o); }
-static int64_t mfl_peek_ptr(int64_t p, int64_t o) { return (int64_t)(intptr_t)*(void**)((char*)(intptr_t)p + o); }
+static inline void mfl_poke_f32(int64_t p, int64_t o, double v) { *(float*)((char*)(intptr_t)p + o) = (float)v; }
+static inline void mfl_poke_f64(int64_t p, int64_t o, double v) { *(double*)((char*)(intptr_t)p + o) = v; }
+static inline void mfl_poke_i8(int64_t p, int64_t o, int64_t v) { *(int8_t*)((char*)(intptr_t)p + o) = (int8_t)v; }
+static inline void mfl_poke_i16(int64_t p, int64_t o, int64_t v) { *(int16_t*)((char*)(intptr_t)p + o) = (int16_t)v; }
+static inline void mfl_poke_i32(int64_t p, int64_t o, int64_t v) { *(int32_t*)((char*)(intptr_t)p + o) = (int32_t)v; }
+static inline void mfl_poke_u32(int64_t p, int64_t o, int64_t v) { *(uint32_t*)((char*)(intptr_t)p + o) = (uint32_t)v; }
+static inline void mfl_poke_i64(int64_t p, int64_t o, int64_t v) { *(int64_t*)((char*)(intptr_t)p + o) = v; }
+static inline void mfl_poke_u8(int64_t p, int64_t o, int64_t v) { *(uint8_t*)((char*)(intptr_t)p + o) = (uint8_t)v; }
+static inline void mfl_poke_u16(int64_t p, int64_t o, int64_t v) { *(uint16_t*)((char*)(intptr_t)p + o) = (uint16_t)v; }
+static inline void mfl_poke_u64(int64_t p, int64_t o, int64_t v) { *(uint64_t*)((char*)(intptr_t)p + o) = (uint64_t)v; }
+static inline void mfl_poke_ptr(int64_t p, int64_t o, int64_t v) { *(void**)((char*)(intptr_t)p + o) = (void*)(intptr_t)v; }
+static inline double mfl_peek_f32(int64_t p, int64_t o) { return (double)*(float*)((char*)(intptr_t)p + o); }
+static inline double mfl_peek_f64(int64_t p, int64_t o) { return *(double*)((char*)(intptr_t)p + o); }
+static inline int64_t mfl_peek_i8(int64_t p, int64_t o) { return (int64_t)*(int8_t*)((char*)(intptr_t)p + o); }
+static inline int64_t mfl_peek_i16(int64_t p, int64_t o) { return (int64_t)*(int16_t*)((char*)(intptr_t)p + o); }
+static inline int64_t mfl_peek_i32(int64_t p, int64_t o) { return (int64_t)*(int32_t*)((char*)(intptr_t)p + o); }
+static inline int64_t mfl_peek_u32(int64_t p, int64_t o) { return (int64_t)*(uint32_t*)((char*)(intptr_t)p + o); }
+static inline int64_t mfl_peek_i64(int64_t p, int64_t o) { return *(int64_t*)((char*)(intptr_t)p + o); }
+static inline int64_t mfl_peek_u8(int64_t p, int64_t o) { return (int64_t)*(uint8_t*)((char*)(intptr_t)p + o); }
+static inline int64_t mfl_peek_u16(int64_t p, int64_t o) { return (int64_t)*(uint16_t*)((char*)(intptr_t)p + o); }
+static inline int64_t mfl_peek_u64(int64_t p, int64_t o) { return (int64_t)*(uint64_t*)((char*)(intptr_t)p + o); }
+static inline int64_t mfl_peek_ptr(int64_t p, int64_t o) { return (int64_t)(intptr_t)*(void**)((char*)(intptr_t)p + o); }
 /* signed-byte dot product with a 32-bit accumulator (the vector-friendly width:
  * cc autovectorizes this where an int64 reduction stays half-speed). Exact while
  * |sum| < 2^31 - always true for i8*i8 up to n ~ 133k - the quantized-matmul

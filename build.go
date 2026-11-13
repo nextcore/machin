@@ -271,13 +271,11 @@ func BuildBinaryStatic(prog *Program, outPath string, safe, static bool) error {
 	usesZlib := strings.Contains(csrc, "mfl_zlib_")
 	bundleSqlite := static && usesSqlite
 
-	// foreign linkage: extern cflags go before the source; -l libs after it
+	// -O3 -march=native: maximum performance auto-vectorization (SIMD) on host CPU
 	// -fno-strict-aliasing: the raw-memory peek_*/poke_* builtins (and other
-	// runtime helpers) type-pun through pointer casts, which -O2's strict
-	// aliasing otherwise treats as UB and can silently miscompile.
-	// -fwrapv: signed overflow wraps two's-complement (matching Go's spec)
-	// instead of being UB that -O2 is free to fold into a constant.
-	args := []string{"-O2", "-fno-strict-aliasing", "-fwrapv", "-std=c11", "-pthread"}
+	// runtime helpers) type-pun through pointer casts.
+	// -fwrapv: signed overflow wraps two's-complement.
+	args := []string{"-O3", "-march=native", "-fno-strict-aliasing", "-fwrapv", "-std=c11", "-pthread"}
 	var srcs []string // extra C source files compiled alongside the generated one
 	if static {
 		args = append(args, "-static")
