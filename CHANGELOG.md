@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.142.0-2
+
+**Zero-Copy Slice Views & OOM Elimination in Iterative Computations.**
+- Optimized `mfl_subslice` to return true zero-copy slice views (`r.data = s.data + lo * es`, `r.len = hi - lo`, `r.cap = s.cap - lo`) without heap allocation or `memcpy`. Eliminates memory accumulation/OOM on slice reslicing loops (`s = s[:old_len]`).
+- Fixed shadowing of C parameter identifiers in date/time codegen helpers (`int64_t ts`).
+
 ## v0.142.0-1
 
 **Upstream Sync (v0.142.0) with Memory Safety & Tip-Rewind Engine.**

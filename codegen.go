@@ -538,11 +538,9 @@ static int64_t mfl_bounds(int64_t i, int64_t n) {
     if (i < 0 || i >= n) { char b[80]; snprintf(b, 80, "index out of range [%lld] with length %lld", (long long)i, (long long)n); mfl_panic(b); }
     return i;
 }
-/* s[lo:hi]: always a fresh copy (never a view sharing s's backing storage) —
-   matches substr's copy semantics on strings and sidesteps cap/aliasing
-   surprises when the result escapes the current block. Bounds are checked
-   unconditionally (like s[i] is under --safe), since an out-of-range slice
-   would otherwise read/copy past the backing array. */
+/* s[lo:hi]: zero-copy slice view sharing s's backing storage.
+   Bounds are checked unconditionally: lo and hi must fit within s.len (or s.cap).
+   Returns a view with adjusted data pointer, length, and remaining capacity. */
 static mfl_slice mfl_subslice(mfl_slice s, int64_t lo, int64_t hi, int64_t es) {
     if (lo < 0 || hi < lo || hi > s.len) {
         char b[96];
@@ -550,13 +548,10 @@ static mfl_slice mfl_subslice(mfl_slice s, int64_t lo, int64_t hi, int64_t es) {
         mfl_panic(b);
     }
     int64_t n = hi - lo;
-    /* Goose/Gojo zero-copy slice optimization:
-       Jika lo == 0 dan hi == s.len, kembalikan view asli tanpa alokasi baru. */
-    if (lo == 0 && n == s.len) {
-        return s;
-    }
-    mfl_slice r = { n ? mfl_alloc(n * es) : NULL, n, n };
-    if (n) memcpy(r.data, (char*)s.data + lo * es, n * es);
+    mfl_slice r;
+    r.data = s.data ? (char*)s.data + lo * es : NULL;
+    r.len  = n;
+    r.cap  = s.cap - lo;
     return r;
 }
 static int64_t mfl_idiv(int64_t a, int64_t b) { if (b == 0) mfl_panic("integer divide by zero"); return a / b; }
@@ -4015,8 +4010,8 @@ static int64_t mfl_now_ms(void) {
 }
 /* decompose a Unix timestamp (local time) into
    [year, month(1-12), day(1-31), hour, minute, second, weekday(0=Sun), yearday(1-366)] */
-static mfl_slice mfl_time_fields(int64_t unix) {
-    time_t t = (time_t)unix;
+static mfl_slice mfl_time_fields(int64_t ts) {
+    time_t t = (time_t)ts;
     struct tm tmv;
     localtime_r(&t, &tmv);
     int64_t v[8] = { tmv.tm_year + 1900, tmv.tm_mon + 1, tmv.tm_mday,
@@ -4027,8 +4022,8 @@ static mfl_slice mfl_time_fields(int64_t unix) {
 }
 /* format a Unix timestamp (local time) with a strftime(3) pattern:
    %Y %m %d %H %M %S %A %a %B %b %p %j %z %Z %F %T ... ("" if it overflows) */
-static char* mfl_time_format(int64_t unix, const char* fmt) {
-    time_t t = (time_t)unix;
+static char* mfl_time_format(int64_t ts, const char* fmt) {
+    time_t t = (time_t)ts;
     struct tm tmv;
     localtime_r(&t, &tmv);
     char buf[512];
@@ -4054,8 +4049,8 @@ static int64_t mfl_time_make(int64_t y, int64_t mo, int64_t d, int64_t h, int64_
     return (int64_t)mktime(&tmv);
 }
 /* like time_format but in UTC (gmtime): the form .ics / RFC-3339 timestamps want. */
-static char* mfl_time_format_utc(int64_t unix, const char* fmt) {
-    time_t t = (time_t)unix;
+static char* mfl_time_format_utc(int64_t ts, const char* fmt) {
+    time_t t = (time_t)ts;
     struct tm tmv;
     gmtime_r(&t, &tmv);
     char buf[512];
