@@ -29,7 +29,7 @@ func main() { compute() }
 		t.Fatalf("CompileToC failed: %v", err)
 	}
 
-	// Pastikan mfl_release di-emit untuk variabel s tepat setelah statement println(s)
+	// Ensure mfl_release is emitted for variable s right after println(s)
 	if !strings.Contains(csrc, "mfl_release((void*)v_s") {
 		t.Fatalf("expected mfl_release for v_s in emitted C, got:\n%s", csrc)
 	}

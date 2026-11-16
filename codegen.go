@@ -28,6 +28,10 @@ func CompileToCTarget(p *Program, safe bool, target string) (string, []string, e
 	if err != nil {
 		return "", nil, err
 	}
+	oomDiags := DetectLoopAllocations(p, c)
+	if len(oomDiags) > 0 {
+		return "", nil, fmt.Errorf("refusing to compile: [%s] %s (in %s)", oomDiags[0].Code, oomDiags[0].Message, oomDiags[0].Decl)
+	}
 	_, liveMap := AnalyzeOwnership(p, c)
 	g := &cgen{c: c, safe: safe, target: target, probeVars: debugProbeVars, cover: coverFuncs, covIdx: map[string]int{}, covStmt: map[Stmt]int{}, jsonMemo: map[string]string{}, parseMemo: map[string]string{}, sortMemo: map[string]string{}, copyMemo: map[string]string{}, chanJSONMemo: map[string][2]string{}, liveness: liveMap}
 	src, err := g.program(p)
@@ -404,8 +408,8 @@ static inline void* mfl_alloc(size_t sz) {
 }
 
 /* mfl_release / tip-rewind (drop-on-last-use):
-   Jika pointer yang dibebaskan adalah alokasi paling terakhir pada chunk aktif,
-   kita bisa langsung memundurkan pointer bump alokator (0-cost recycling). */
+   If the deallocated pointer is the most recent allocation on the active chunk,
+   we can immediately rewind the bump allocator pointer (0-cost recycling). */
 static void mfl_release(void* p, size_t sz) {
     if (!p || sz == 0) return;
     if (!mfl_arena_cur) mfl_arena_cur = &mfl_main_arena;
@@ -7294,8 +7298,8 @@ func (g *cgen) emitProbe(name string, kind Kind, depth int) {
 	fmt.Fprintf(&g.buf, "mfl_rr_probe(%q, %s);\n", name, val)
 }
 
-// emitLastUseDrops menginjeksi pemanggilan mfl_release pada statement terakhir (last use)
-// variabel bertipe string atau slice, menerapkan prinsip drop-on-last-use dari Gojo.
+// emitLastUseDrops injects mfl_release calls at the statement of last use
+// for string or slice variables, applying compile-time drop-on-last-use.
 func (g *cgen) emitLastUseDrops(s Stmt, depth int) {
 	if g.liveness == nil {
 		return

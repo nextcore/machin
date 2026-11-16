@@ -1,6 +1,6 @@
 # The MFL Language Specification
 
-Version 0.142.0-3 (Runtime Allocator Optimization, -O3 SIMD Vectorization, Zero-Copy Views)
+Version 0.142.0-4 (Compile-Time OOM Protection, Recursive Multi-File Project Resolution, SIMD -O3)
 
 MFL (Machine-First Language) is a statically-typed, Go-flavored backend language
 **shaped for machine authoring**: minimal syntax, no type annotations, one

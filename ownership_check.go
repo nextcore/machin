@@ -2,16 +2,16 @@ package main
 
 // Liveness and Ownership Analysis.
 //
-// Melacak penggunaan variabel lokal dalam suatu fungsi untuk menentukan:
-// 1. Titik penggunaan terakhir (Last-Use point) dari variabel bertipe buffer/string/slice/map/struct.
-// 2. Status kepemilikan variabel (Owned, Borrowed, Moved, Dropped).
-// 3. Mencegah use-after-move dan use-after-free pada tingkat compile-time.
+// Tracks local variable usage across function statements to determine:
+// 1. Last-use point of buffer/string/slice/map/struct typed variables.
+// 2. Variable ownership states (Owned, Borrowed, Moved, Dropped).
+// 3. Compile-time prevention of use-after-move and use-after-free bugs.
 
 import (
 	"fmt"
 )
 
-// VarState merepresentasikan status kepemilikan suatu variabel lokal.
+// VarState represents the ownership state of a local variable.
 type VarState int
 
 const (
@@ -36,7 +36,7 @@ func (s VarState) String() string {
 	}
 }
 
-// OwnershipDiagnostic menyimpan temuan pelanggaran kepemilikan.
+// OwnershipDiagnostic holds compile-time ownership violation findings.
 type OwnershipDiagnostic struct {
 	Code    string // e.g. "OWN001", "OWN002"
 	Message string
@@ -44,16 +44,16 @@ type OwnershipDiagnostic struct {
 	Decl    string
 }
 
-// LivenessInfo mencatat lokasi penggunaan variabel dalam statement.
+// LivenessInfo records variable usage positions in statements.
 type LivenessInfo struct {
-	// Variabel-variabel yang terakhir kali digunakan pada statement ini (siap di-drop/reclaim).
+	// Variables whose last use occurs at this statement (eligible for drop/reclaim).
 	LastUses map[Stmt][]string
-	// Variabel yang dipindahkan kepemilikannya (misal via ch <- v).
+	// Variables whose ownership has been moved (e.g. via ch <- v).
 	MovedVars map[string]bool
 }
 
-// AnalyzeOwnership melakukan forward dataflow analysis untuk melacak ownership dan last-use
-// pada setiap fungsi dalam AST Program.
+// AnalyzeOwnership performs forward dataflow analysis to track ownership and last-use
+// points across every function in the Program AST.
 func AnalyzeOwnership(prog *Program, c *Checker) ([]OwnershipDiagnostic, map[*FuncDecl]*LivenessInfo) {
 	var diags []OwnershipDiagnostic
 	funcLiveness := make(map[*FuncDecl]*LivenessInfo)
@@ -74,26 +74,26 @@ func analyzeFuncOwnership(fn *FuncDecl, c *Checker) (*LivenessInfo, []OwnershipD
 	}
 	var diags []OwnershipDiagnostic
 
-	// 1. Hitung kemunculan pembacaan setiap variabel lokal
-	// Var -> daftar urutan statement yang mengaksesnya
+	// 1. Count occurrences of reads for each local variable:
+	// Var -> statement list accessing it in order
 	accessMap := make(map[string][]Stmt)
 	escaped := make(map[string]bool)
 
-	// Tandai variabel yang di-box oleh closure sebagai escaping
+	// Mark variables boxed by closures as escaping
 	if fn.Boxed != nil {
 		for v := range fn.Boxed {
 			escaped[v] = true
 		}
 	}
 
-	// Buat map global untuk deteksi assignment ke global
+	// Build global variable set to detect global assignments
 	globalSet := make(map[string]bool)
 	if c != nil {
 		for _, g := range c.GlobalOrder() {
 			globalSet[g] = true
 		}
 	}
-	// Return variables juga escaping sehingga nilai yang dimasukkan ke dalamnya tidak di-drop
+	// Return variables escape so their assigned values are not dropped
 	for _, r := range fn.Returns {
 		globalSet[r] = true
 		escaped[r] = true
@@ -107,15 +107,15 @@ func analyzeFuncOwnership(fn *FuncDecl, c *Checker) (*LivenessInfo, []OwnershipD
 				if isLocalVariable(fn, v) {
 					accessMap[v] = append(accessMap[v], stmt)
 					if inLoop {
-						// Variabel yang diakses di dalam loop tidak boleh di-drop di dalam loop
-						// karena iterasi berikutnya masih berpotensi menggunakannya.
+						// Variables accessed inside loops cannot be dropped inside the loop
+						// since subsequent iterations might still access them.
 						escaped[v] = true
 					}
 				}
 			}
 
-			// Deteksi escape:
-			// a) Assign ke variabel global (misal: g_config = local_data)
+			// Escape detection:
+			// a) Assignment to global variable (e.g.: g_config = local_data)
 			if as, ok := stmt.(*AssignStmt); ok {
 				if globalSet[as.Name] {
 					vReads := collectReadIdents(as)
@@ -124,15 +124,15 @@ func analyzeFuncOwnership(fn *FuncDecl, c *Checker) (*LivenessInfo, []OwnershipD
 					}
 				}
 			}
-			// b) Return statement: nilai yang dikembalikan keluar dari fungsi
+			// b) Return statement: values returned escape the function scope
 			if ret, ok := stmt.(*ReturnStmt); ok {
 				vReads := collectReadIdents(ret)
 				for rv := range vReads {
 					escaped[rv] = true
 				}
 			}
-			// c) Function / method calls: argumen yang dilewatkan ke fungsi lain berpotensi disimpan
-			// ke variabel global, closure, atau struktur lain (escape)
+			// c) Function / method calls: arguments passed to external functions could be stored
+			// in global state, closures, or escaping heap containers
 			walkExprs(stmt, func(e Expr) {
 				if call, ok := e.(*Call); ok {
 					for _, arg := range call.Args {
@@ -149,7 +149,7 @@ func analyzeFuncOwnership(fn *FuncDecl, c *Checker) (*LivenessInfo, []OwnershipD
 				}
 			})
 
-			// Rekursif ke dalam blok if, while, for-range
+			// Recurse into conditional and loop blocks
 			switch s := stmt.(type) {
 			case *IfStmt:
 				scanStmts(s.Then, inLoop)
@@ -166,7 +166,7 @@ func analyzeFuncOwnership(fn *FuncDecl, c *Checker) (*LivenessInfo, []OwnershipD
 
 	scanStmts(fn.Body, false)
 
-	// 2. Catat titik last-use untuk setiap variabel (kecuali yang lolos / escaped)
+	// 2. Record last-use points for each local variable (unless escaped)
 	for v, stmts := range accessMap {
 		if escaped[v] {
 			continue
@@ -177,8 +177,8 @@ func analyzeFuncOwnership(fn *FuncDecl, c *Checker) (*LivenessInfo, []OwnershipD
 		}
 	}
 
-	// 3. Verifikasi Move Semantics (misal: kirim ke channel: SendStmt)
-	movedAt := make(map[string]int) // var -> index statement
+	// 3. Verify move semantics (e.g. channel send: SendStmt)
+	movedAt := make(map[string]int) // var -> statement index
 
 	for idx, stmt := range fn.Body {
 		switch s := stmt.(type) {
@@ -199,7 +199,7 @@ func analyzeFuncOwnership(fn *FuncDecl, c *Checker) (*LivenessInfo, []OwnershipD
 				}
 			}
 		default:
-			// Periksa apakah statement setelah titik move mencoba membaca variabel yang sudah moved
+			// Check if statements after the move attempt to read the moved variable
 			reads := collectReadIdents(stmt)
 			for r := range reads {
 				if mIdx := movedAt[r]; mIdx > 0 && idx >= mIdx {
@@ -217,7 +217,7 @@ func analyzeFuncOwnership(fn *FuncDecl, c *Checker) (*LivenessInfo, []OwnershipD
 	return info, diags
 }
 
-// isLocalVariable mengecek apakah sebuah identifier adalah parameter atau variabel lokal fungsi.
+// isLocalVariable checks if an identifier is a parameter or a local variable of the function.
 func isLocalVariable(fn *FuncDecl, name string) bool {
 	for _, p := range fn.Params {
 		if p == name {
@@ -258,7 +258,7 @@ func isLocalVariable(fn *FuncDecl, name string) bool {
 	return found
 }
 
-// collectReadIdents mengumpulkan semua variabel yang dibaca dalam suatu Statement.
+// collectReadIdents gathers all variable identifiers read within a given Statement.
 func collectReadIdents(stmt Stmt) map[string]bool {
 	reads := make(map[string]bool)
 	switch s := stmt.(type) {
@@ -319,11 +319,18 @@ func collectReadIdents(stmt Stmt) map[string]bool {
 				}
 			})
 		}
+	case *ArenaStmt:
+		for _, st := range s.Body {
+			r := collectReadIdents(st)
+			for k := range r {
+				reads[k] = true
+			}
+		}
 	}
 	return reads
 }
 
-// walkExprs melakukan traversal ekspresi dalam AST statement.
+// walkExprs traverses all expressions within an AST statement.
 func walkExprs(stmt Stmt, fn func(Expr)) {
 	if stmt == nil {
 		return

@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.142.0-4
+
+**Compile-Time OOM Guard & Go-Style Recursive Multi-File Project Resolution.**
+- **Compile-Time OOM Protection (`[OOM001]`):** Static detection of unbounded heap allocations (`make()`, dynamic string concatenation, `append()`) inside loops without an `arena { }` boundary; compiler strictly rejects builds to prevent runtime memory exhaustion.
+- **Go-Style Project Resolution (`machin build .` / `machin run .`):** Full support for directory targets and multi-file projects.
+- **Recursive Directory Walk:** Automatically discovers and composes all `*.src` files across nested subdirectories, ignoring drafts (`_*`), backups, tests, and cache folders.
+- **Auto-Generated Canonical Snapshot (`.mfl`):** Every project build/run continuously generates an up-to-date, single-file canonical `.mfl` artifact in the project root for AI agent consumption.
+- **Documentation & Localization:** Replaced all internal comments and CLI terminal guides (`machin guide`) with standardized English.
+
 ## v0.142.0-3
 
 **Runtime Allocator Optimization & SIMD Compiler Flags.**

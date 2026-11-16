@@ -301,9 +301,9 @@ func cmdRun(args []string) error {
 		}
 	}
 	if src == "" {
-		return fmt.Errorf("run: need exactly one .mfl file")
+		src = "."
 	}
-	prog, err := loadMFL(src)
+	prog, _, _, err := resolveProjectInput(src, "")
 	if err != nil {
 		return err
 	}
@@ -474,7 +474,7 @@ func cmdBuild(args []string) error {
 		}
 	}
 	if src == "" {
-		return fmt.Errorf("build: need a .mfl file")
+		src = "."
 	}
 	switch target {
 	case "", "native":
@@ -490,9 +490,12 @@ func cmdBuild(args []string) error {
 	default:
 		return fmt.Errorf("build: unknown --target %q (want native, wasm, or windows)", target)
 	}
-	prog, err := loadMFL(src)
+	prog, effectiveOut, _, err := resolveProjectInput(src, out)
 	if err != nil {
 		return err
+	}
+	if out == "" && effectiveOut != "" {
+		out = effectiveOut
 	}
 	if raceSafe {
 		if err := raceGate(prog); err != nil {

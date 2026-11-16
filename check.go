@@ -221,6 +221,19 @@ func analyzeSourceSpan(combined string, srcNames []string, files []DiagFile, all
 				})
 			}
 
+			// oom phase: compile-time rejection of unbounded heap allocations in loops
+			oomDiags := DetectLoopAllocations(prog, c)
+			for _, oom := range oomDiags {
+				diags = append(diags, Diagnostic{
+					Severity: "error",
+					Phase:    "typecheck",
+					Code:     oom.Code,
+					Message:  oom.Message,
+					Decl:     oom.Decl,
+					Line:     declLine[oom.Decl],
+				})
+			}
+
 			// arena phase: a value allocated inside an `arena { }` block that escapes to a
 			// location outliving the block (so it dangles after bulk reclamation). Sound +
 			// conservative — a clean result proves the block's reclamation is safe. Advisory.
