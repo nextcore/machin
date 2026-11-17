@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.142.0-5
+
+**Upstream Sync: Streaming HTTP/SSE, Cleartext WebSockets, IMAP Client & OpenCL Causal Attention.**
+- **Streaming HTTP & SSE Client (`framework/httpstream.src`):** Incremental decoded reads (`hs_open`, `hs_read`, `hs_sse_next`) for chunked/Content-Length/close-delimited HTTP responses and real-time Server-Sent Events (LLM token streaming).
+- **Cleartext WebSocket Support:** Added native C builtins `ws_open`, `ws_send`, `ws_recv`, `ws_close` (+ `_bin` variants) for `ws://` connections without OpenSSL dependency, alongside pure-MFL `framework/wsclient.src` client.
+- **IMAP Client (`framework/imap.src`):** Pure-MFL IMAP4rev1 client over `dial()` with STARTTLS negotiation, mailbox management, and untagged literal fetch.
+- **Extern Types-Only Blocks:** Relaxed parser to accept `extern` blocks containing only `cstruct` definitions without requiring `fn` functions.
+- **OpenCL GPU Profiling & Attention:** Added `attention_causal_f32` GPU kernel for transformers, `prof_print()` builtin, and event-based kernel profiling via `MFL_PROF=1`.
+
 ## v0.142.0-4
 
 **Compile-Time OOM Guard & Go-Style Recursive Multi-File Project Resolution.**

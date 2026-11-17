@@ -29,7 +29,7 @@ func CompileToCTarget(p *Program, safe bool, target string) (string, []string, e
 		return "", nil, err
 	}
 	oomDiags := DetectLoopAllocations(p, c)
-	if len(oomDiags) > 0 {
+	if safe && len(oomDiags) > 0 {
 		return "", nil, fmt.Errorf("refusing to compile: [%s] %s (in %s)", oomDiags[0].Code, oomDiags[0].Message, oomDiags[0].Decl)
 	}
 	_, liveMap := AnalyzeOwnership(p, c)

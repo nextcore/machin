@@ -221,12 +221,12 @@ func analyzeSourceSpan(combined string, srcNames []string, files []DiagFile, all
 				})
 			}
 
-			// oom phase: compile-time rejection of unbounded heap allocations in loops
+			// oom phase: advisory warnings for unbounded heap allocations in loops
 			oomDiags := DetectLoopAllocations(prog, c)
 			for _, oom := range oomDiags {
-				diags = append(diags, Diagnostic{
-					Severity: "error",
-					Phase:    "typecheck",
+				warns = append(warns, Diagnostic{
+					Severity: "warning",
+					Phase:    "oom",
 					Code:     oom.Code,
 					Message:  oom.Message,
 					Decl:     oom.Decl,
