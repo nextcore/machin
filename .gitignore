@@ -9,3 +9,5 @@ coverage.html
 selfhost/mfl-*
 *.exe
 /ref/
+
+.fuse_hidden*
