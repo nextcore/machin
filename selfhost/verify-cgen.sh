@@ -420,6 +420,20 @@ func main() {
 }
 EOF
 run "$T/h20.src"
+# h21 — #697: a types-only extern (cstructs, no fn) parses and emits the same
+# cstruct typedefs + marshaling converters as the Go codegen.
+cat > "$T/h21.src" <<'EOF'
+extern "types" {
+    cstruct Point { x i32 y i32 }
+    cstruct Size { w i32  h i32 }
+}
+func main() {
+    p := Point{x: 1, y: 2}
+    s := Size{w: 3, h: 4}
+    println(p.x + p.y + s.w + s.h)
+}
+EOF
+run "$T/h21.src"
 
 # h22 — global initializers may reference earlier globals AND call functions /
 # builtins (idents inside make() sizes, arithmetic, Call nodes). The "$globals"
@@ -435,6 +449,23 @@ var s = str(n) + "!"
 func main() { println(m + len(xs) + d + len(s)) }
 EOF
 run "$T/h22.src"
+
+# h23 — ws:// builtins (#694): variable-arity ws_open + the _bin variants must
+# emit byte-identical calls to the Go codegen.
+cat > "$T/h23.src" <<'EOF'
+func main() {
+    h := ws_open("ws://x")
+    h2 := ws_open("ws://y", []string{"Authorization: Bearer t"})
+    ws_send(h, "hi")
+    println(ws_recv(h))
+    ws_send_bin(h, from_hex("00ff"))
+    b := ws_recv_bin(h2)
+    println(to_hex(b))
+    ws_close(h)
+    ws_close(h2)
+}
+EOF
+run "$T/h23.src"
 
 # SELF-APPLICATION: the MFL codegen emits byte-identical C for the compiler's OWN
 # source (checker + full codegen) — the fixpoint-adjacent milestone.

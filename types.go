@@ -2886,6 +2886,8 @@ func (c *Checker) genCall(fn *FuncDecl, ex *Call) (int, error) {
 		return c.cVoid, nil
 	case "ocl_release":
 		return c.cVoid, nil
+	case "prof_print":
+		return c.cVoid, nil
 	case "group_norm_f32":
 		if len(argSlots) != 9 {
 			return 0, fmt.Errorf("group_norm_f32: 9 args (out, in, w, b, channels, h, w_dim, groups, eps)")
@@ -2907,6 +2909,15 @@ func (c *Checker) genCall(fn *FuncDecl, ex *Call) (int, error) {
 	case "attention_f32":
 		if len(argSlots) != 9 {
 			return 0, fmt.Errorf("attention_f32: 9 args (q, k, v, out, seq, ctx_seq, channels, heads, scale)")
+		}
+		for i := 0; i < 8; i++ {
+			c.addPair(argSlots[i], c.cInt)
+		}
+		c.addPair(argSlots[8], newSlot(c, KNum))
+		return c.cVoid, nil
+	case "attention_causal_f32":
+		if len(argSlots) != 9 {
+			return 0, fmt.Errorf("attention_causal_f32: 9 args (q, k, v, out, seq, ctx_seq, channels, heads, scale)")
 		}
 		for i := 0; i < 8; i++ {
 			c.addPair(argSlots[i], c.cInt)
@@ -3347,6 +3358,47 @@ func (c *Checker) genCall(fn *FuncDecl, ex *Call) (int, error) {
 	case "wss_close":
 		if len(argSlots) != 1 {
 			return 0, fmt.Errorf("wss_close: 1 arg (conn int)")
+		}
+		c.addPair(argSlots[0], c.cInt)
+		return c.cInt, nil
+	case "ws_open":
+		if len(argSlots) != 1 && len(argSlots) != 2 {
+			return 0, fmt.Errorf("ws_open: 1 or 2 args (url string[, headers []string])")
+		}
+		c.addPair(argSlots[0], c.cString)
+		if len(argSlots) == 2 {
+			c.addPair(argSlots[1], newSliceSlot(c, c.cString))
+		}
+		return c.cInt, nil
+	case "ws_send":
+		if len(argSlots) != 2 {
+			return 0, fmt.Errorf("ws_send: 2 args (conn int, msg string)")
+		}
+		c.addPair(argSlots[0], c.cInt)
+		c.addPair(argSlots[1], c.cString)
+		return c.cInt, nil
+	case "ws_recv":
+		if len(argSlots) != 1 {
+			return 0, fmt.Errorf("ws_recv: 1 arg (conn int)")
+		}
+		c.addPair(argSlots[0], c.cInt)
+		return c.cString, nil
+	case "ws_send_bin":
+		if len(argSlots) != 2 {
+			return 0, fmt.Errorf("ws_send_bin: 2 args (conn int, payload bytes)")
+		}
+		c.addPair(argSlots[0], c.cInt)
+		c.addPair(argSlots[1], c.cBytes)
+		return c.cInt, nil
+	case "ws_recv_bin":
+		if len(argSlots) != 1 {
+			return 0, fmt.Errorf("ws_recv_bin: 1 arg (conn int)")
+		}
+		c.addPair(argSlots[0], c.cInt)
+		return c.cBytes, nil
+	case "ws_close":
+		if len(argSlots) != 1 {
+			return 0, fmt.Errorf("ws_close: 1 arg (conn int)")
 		}
 		c.addPair(argSlots[0], c.cInt)
 		return c.cInt, nil
