@@ -1,6 +1,6 @@
 # The MFL Language Specification
 
-Version 0.142.0-5 (Streaming HTTP/SSE, Cleartext WebSockets, IMAP Client & OpenCL Causal Attention)
+Version 0.142.0-6 (CalDAV Pure-MFL Client & Multi-Assign Ownership Tracking)
 
 MFL (Machine-First Language) is a statically-typed, Go-flavored backend language
 **shaped for machine authoring**: minimal syntax, no type annotations, one

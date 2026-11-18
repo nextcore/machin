@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.142.0-6
+
+**Upstream Sync: Pure-MFL CalDAV Client & Multi-Assign Ownership Tracking.**
+- **CalDAV Client (`framework/caldav.src`):** Pure-MFL CalDAV client (RFC 4791/6352) over `http_request` + `framework/xml.src`. Supports PROPFIND discovery (`caldav_discover`), collection listing (`caldav_list`), REPORT calendar-queries (`caldav_query`), and GET/PUT/DELETE for iCalendar objects with Basic auth.
+- **Ownership & Liveness Analysis Robustness:** Enhanced compile-time drop-on-last-use analysis in `ownership_check.go` with full support for `MultiAssign` statements and struct literal values, preventing premature string/buffer releases during multi-value function assignments.
+
 ## v0.142.0-5
 
 **Upstream Sync: Streaming HTTP/SSE, Cleartext WebSockets, IMAP Client & OpenCL Causal Attention.**
